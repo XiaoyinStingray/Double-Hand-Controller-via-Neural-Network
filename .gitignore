@@ -269,4 +269,7 @@ config.local.*
 *.local.yaml
 *.local.yml
 
+# Downloaded tools (static ffmpeg builds, etc.)
+tools/
+
 /docs/

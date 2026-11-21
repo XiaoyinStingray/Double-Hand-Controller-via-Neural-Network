@@ -49,6 +49,14 @@ bash scripts/setup_env.sh hand          # 只装训练依赖（无显示器也�
 
 **数据集、模型权重与设计文档均不入库**，数据通过下载脚本 + 校验和还原。
 
+```bash
+conda run -n hand python scripts/download_data.py          # 幂等，已下载会跳过
+conda run -n hand python scripts/audit_ipn.py --landmarks data/raw/IPN_HandS_landmarks_GT
+conda run -n hand python scripts/extract_frames.py --split train --stride 3
+```
+
+`ffmpeg`：Windows 建议把静态构建放到 `tools/ffmpeg/`（已忽略），或确保 `ffmpeg` 在 `PATH` 中。
+
 ## 仓库结构
 
 ```
