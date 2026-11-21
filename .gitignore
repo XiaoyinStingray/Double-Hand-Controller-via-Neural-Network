@@ -268,3 +268,5 @@ Thumbs.db
 config.local.*
 *.local.yaml
 *.local.yml
+
+/docs/
