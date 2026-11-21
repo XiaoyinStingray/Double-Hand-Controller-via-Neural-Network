@@ -1,0 +1,18 @@
+# Normalize text files, keep binaries untouched
+* text=auto
+
+*.pdf  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.bmp  binary
+*.mp4  binary
+*.avi  binary
+*.mov  binary
+*.onnx binary
+*.pt   binary
+*.pth  binary
+*.npy  binary
+*.npz  binary
+*.zip  binary
