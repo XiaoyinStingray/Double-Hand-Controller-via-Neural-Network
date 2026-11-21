@@ -33,7 +33,7 @@ python -m venv .venv
 - [IPN HandS](https://github.com/GibranBenitez/IPN-hand/blob/master/README_HandS.md)：逐帧人工校正的 21 点关键点 + 细化时序标注
 - 自采数据：3 个会话、多背景/光照，用于域适应与端到端评测
 
-**数据集与模型权重不入库**，通过下载脚本 + 校验和还原，详见 `docs/plan.md`。
+**数据集、模型权重与设计文档均不入库**，数据通过下载脚本 + 校验和还原。
 
 ## 仓库结构
 
@@ -51,7 +51,7 @@ src/
 apps/
   web/         演示网页与双手小游戏
   server/      本地服务（FastAPI + WebSocket）
-docs/          方案、实验记录、报告与图表
+docs/          本地私有，不入库（方案、实验记录、报告与图表）
 tests/         单元测试
 ```
 
