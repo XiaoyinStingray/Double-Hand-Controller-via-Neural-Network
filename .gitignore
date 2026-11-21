@@ -221,3 +221,50 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ===== Deep Learning / CV project =====
+# Datasets (always downloaded/regenerated, never committed)
+data/
+datasets/
+IPN_Hand*/
+*.zip
+*.tar.gz
+*.rar
+
+# Model weights & exported models
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+*.trt
+checkpoints/
+weights/
+
+# Training / experiment outputs
+runs/
+wandb/
+outputs/
+logs/
+*.csv
+*.xlsx
+
+# Media (demo recordings kept out of git, upload to release/cloud)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wav
+
+# Notebook / editor local state
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# Local config & secrets
+config.local.*
+*.local.yaml
+*.local.yml
