@@ -18,14 +18,28 @@
 
 ## 快速开始
 
-> 环境与数据准备脚本将在 P1 阶段补充。
-
 ```bash
 git clone git@github.com:XiaoyinStingray/Double-Hand-Controller-via-Neural-Network.git
 cd Double-Hand-Controller-via-Neural-Network
-python -m venv .venv
-# 依赖见 requirements.txt（待补充）
 ```
+
+**Windows（本地开发 / 演示）**
+
+```powershell
+# 从已有的 CUDA 环境 ComAi 克隆出 hand，再补依赖（见脚本内注释）
+powershell -ExecutionPolicy Bypass -File scripts\setup_env.ps1
+conda activate hand
+python scripts/check_env.py --require-app
+```
+
+**Linux（集群训练）**
+
+```bash
+bash scripts/setup_env.sh hand          # 只装训练依赖（无显示器也可）
+```
+
+模型权重（检测/姿态、MediaPipe）由 `scripts/download_models.py` 下载到 `weights/`，不随仓库分发。
+运行环境：Python 3.9 + torch 2.3.0 (cu121)，逐项版本见 `requirements.txt`。
 
 ## 数据集
 

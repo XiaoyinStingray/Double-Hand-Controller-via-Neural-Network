@@ -1,0 +1,25 @@
+# Runtime for training / inference (Python 3.9, works headless on the cluster).
+# torch / torchvision are installed separately (see scripts/setup_env.*):
+#   pip install torch==2.3.0 torchvision==0.18.0 --index-url https://download.pytorch.org/whl/cu121
+#
+# Note: opencv-python + opencv-contrib-python are pinned to the same version
+# because mediapipe requires the contrib build, while ultralytics requires the
+# plain build. Same version => identical shared files => safe.
+
+# --- CV / DL ---
+ultralytics==8.4.216
+opencv-python==4.10.0.84
+opencv-contrib-python==4.10.0.84
+mediapipe==1.2.3
+onnx==1.19.1
+onnxruntime==1.19.2
+supervision==0.29.1
+scikit-learn==1.6.1
+seaborn==0.13.2
+pandas==2.3.3
+matplotlib==3.9.4
+numpy==1.26.4
+scipy==1.13.1
+Pillow==10.4.0
+PyYAML==6.0.2
+tqdm==4.67.3
