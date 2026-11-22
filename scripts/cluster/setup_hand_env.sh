@@ -21,7 +21,8 @@ echo "$BASE" > "$ENV/lib/python3.11/site-packages/00-base.pth"
 
 # --no-deps: do not let pip replace the image's torch
 "$ENV/bin/pip" install --no-cache-dir --no-deps \
-    ultralytics==8.4.216 ultralytics-thop==2.2.5 polars==1.36.1
+    ultralytics==8.4.216 ultralytics-thop==2.2.5 \
+    polars==1.36.1 polars-runtime-32==1.36.1
 
 "$ENV/bin/python" - <<'PY'
 import torch, ultralytics
