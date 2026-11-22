@@ -23,7 +23,7 @@ echo "[$(date)] data ready: $(find "$WORK/images" -type f | wc -l) images"
     --model "$WORK/weights/yolo11n-pose.pt" \
     --epochs 100 \
     --imgsz 640 \
-    --batch 32 \
+    --batch 16 \
     --device 0 \
     --workers 8 \
     --project /gdata1/zhaojy/exp/hand_pose \

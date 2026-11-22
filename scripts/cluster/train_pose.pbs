@@ -6,7 +6,7 @@
 #PBS -N hand_pose
 #PBS -o /gdata1/zhaojy/exp/logs/${PBS_JOBID}.out
 #PBS -e /gdata1/zhaojy/exp/logs/${PBS_JOBID}.err
-#PBS -l nodes=1:gpus=1:A
+#PBS -l nodes=1:gpus=1:s
 #PBS -l walltime=24:00:00
 #PBS -r y
 
