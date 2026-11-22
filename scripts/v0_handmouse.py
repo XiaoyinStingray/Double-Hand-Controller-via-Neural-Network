@@ -1,16 +1,15 @@
-"""V0 -- single-hand gesture mouse (rule-based, no training).
+"""V0 -- single-hand gesture mouse (rule-based).
 
 Slice A: camera + MediaPipe landmarks + FPS.
 Slice B: normalized features + 4 gesture rules + temporal stabilizer.
-
-This slice still does NOT move the mouse. Its only job is to produce stable
-labels; cursor/click come in slice C/E.
+Slice C/E: cursor + One-Euro + pinch click/drag + scroll + pause.
 
 Usage:
-    conda run -n hand python scripts/v0_handmouse.py
-    conda run -n hand python scripts/v0_handmouse.py --headless --frames 300
+    python scripts/v0_handmouse.py                 # live mouse control
+    python scripts/v0_handmouse.py --dry-run       # log actions, do not move mouse
+    python scripts/v0_handmouse.py --headless --dry-run --frames 300
 
-Keys: Esc / q to quit.
+Keys: Esc / q quit, r resume, p pause.
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import sys
 import time
 from collections import Counter, deque
 from dataclasses import dataclass
@@ -34,6 +34,11 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from src.control.cursor import FixedRegionMapper  # noqa: E402
+from src.control.mouse import MouseController  # noqa: E402
+
 MODEL_PATH = ROOT / "weights" / "hand_landmarker.task"
 
 CAMERA_INDEX = 0
@@ -49,7 +54,6 @@ SWAP_HANDEDNESS = True
 FINGER_STRAIGHT_DEG = 25.0   # joint angle below this = straight
 FINGER_FAR_RATIO = 1.1       # tip must be farther from wrist than pip
 THUMB_OUT_DIST = 0.55        # thumb tip to pinky MCP, in palm-size units
-FIST_INDEX_DEG = 100.0       # index PIP above this = tightly curled (fist)
 PINCH_ENTER, PINCH_EXIT = 0.25, 0.35
 STABLE_FRAMES = 3
 MIN_HOLD_S = 0.2
@@ -75,7 +79,8 @@ class HandFeatures:
     q: np.ndarray         # (21,2) wrist-origin, palm-scaled, right-hand canonical
     fingers: np.ndarray   # (5,) bool, index 0 = thumb
     angles: np.ndarray    # (5,) PIP joint angles in degrees (index 0 unused)
-    pinch: float
+    pinch: float          # ||thumb_tip - index_tip|| (palm units)
+    d_knuckle: float      # min(||thumb_tip - index_MCP/PIP||)
     palm: np.ndarray      # (2,) pixels
     tip: np.ndarray       # (2,) pixels, index fingertip
     v_palm: np.ndarray    # (2,) px/s (EMA)
@@ -169,14 +174,19 @@ def extract_features(result, index: int, w: int, h: int, t: float,
     fingers[0] = float(np.linalg.norm(q[4] - q[17])) > THUMB_OUT_DIST
 
     pinch = float(np.linalg.norm(q[4] - q[8]))
+    # Where is the thumb tip relative to the index knuckles? In a pinch it is
+    # closest to the index TIP; in a fist it is closest to the MCP/PIP.
+    d_knuckle = float(min(np.linalg.norm(q[4] - q[5]),
+                          np.linalg.norm(q[4] - q[6])))
     palm = pts[list(PALM_IDX)].mean(axis=0)
     v_palm = velocity.update(palm, t).copy()
 
-    return HandFeatures(side, pts, q, fingers, angles, pinch, palm, pts[8], v_palm)
+    return HandFeatures(side, pts, q, fingers, angles, pinch, d_knuckle,
+                        palm, pts[8], v_palm)
 
 
 class GestureRules:
-    """Raw per-frame label. PINCH uses hysteresis; FIST has top priority."""
+    """Raw per-frame label. PINCH uses geometry + hysteresis; FIST if no pinch."""
 
     def __init__(self) -> None:
         self.pinch_active = False
@@ -185,20 +195,21 @@ class GestureRules:
         self.pinch_active = False
 
     def update(self, feat: HandFeatures) -> str:
-        if feat.pinch < PINCH_ENTER:
+        # A real pinch: the thumb tip is near the index tip AND closer to it
+        # than to the index MCP/PIP. In a fist the thumb wraps onto the
+        # knuckles, so d_knuckle < pinch.
+        pinch_shape = (feat.pinch < PINCH_ENTER
+                       and feat.pinch <= feat.d_knuckle * 1.15)
+        if pinch_shape:
             self.pinch_active = True
-        elif feat.pinch > PINCH_EXIT:
+        elif feat.pinch > PINCH_EXIT or feat.pinch > feat.d_knuckle * 1.30:
             self.pinch_active = False
 
         four = feat.fingers[1:]
-        # FIST vs PINCH ambiguity: a pinch with the other three fingers
-        # curled also looks like "all four folded". The index PIP angle
-        # separates them: pinch ~40-70 deg, tight fist >100 deg.
-        fist_like = not np.any(four)
-        if fist_like and not (self.pinch_active and feat.angles[1] < FIST_INDEX_DEG):
-            return "FIST"
         if self.pinch_active:
             return "PINCH"
+        if not np.any(four):
+            return "FIST"
         if int(four.sum()) == 1 and four[0]:
             return "POINT"
         if int(four.sum()) >= 3:
@@ -277,7 +288,8 @@ def to_mp_image(frame_bgr: np.ndarray) -> mp.Image:
 
 
 def draw_result(frame, result, feat, raw: str, stable: str,
-                fps: float, detect_ms: float, switches: int) -> None:
+                fps: float, detect_ms: float, switches: int,
+                state: str, action: str, cursor) -> None:
     """Draw landmarks + debug text. English only: cv2 cannot render CJK."""
     h, w = frame.shape[:2]
     color = COLORS.get(stable, (0, 200, 0))
@@ -295,9 +307,10 @@ def draw_result(frame, result, feat, raw: str, stable: str,
         cv2.circle(frame, tuple(feat.tip.astype(int)), 8, color, 2)
         bits = "".join("1" if f else "0" for f in feat.fingers)
         cv2.putText(frame,
-                    f"pinch {feat.pinch:.2f}  aIdx {feat.angles[1]:3.0f}  "
-                    f"fingers {bits}  vY {feat.v_palm[1]:+6.0f} px/s",
-                    (10, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    f"pinch {feat.pinch:.2f} dKn {feat.d_knuckle:.2f} "
+                    f"aIdx {feat.angles[1]:3.0f} | {bits} "
+                    f"vY {feat.v_palm[1]:+5.0f}",
+                    (10, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (220, 220, 220), 1)
 
     cv2.putText(frame,
@@ -307,6 +320,13 @@ def draw_result(frame, result, feat, raw: str, stable: str,
     cv2.putText(frame, f"{raw:5s} -> {stable}", (10, 58),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
+    state_color = (0, 0, 255) if state != "RUNNING" else (0, 255, 0)
+    cv2.putText(frame, f"{state}  {action}", (10, 88),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, state_color, 2)
+    if cursor is not None:
+        cv2.putText(frame, f"screen {int(cursor[0])},{int(cursor[1])}",
+                    (10, 116), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -315,17 +335,68 @@ def main() -> None:
                         help="no window; useful for a quick smoke test")
     parser.add_argument("--frames", type=int, default=0,
                         help="stop after N frames (0 = run until quit)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="log actions but do not move/click the OS mouse")
+    parser.add_argument("--active-x", type=float, nargs=2,
+                        default=(0.25, 0.75), metavar=("X0", "X1"))
+    parser.add_argument("--active-y", type=float, nargs=2,
+                        default=(0.30, 0.70), metavar=("Y0", "Y1"))
+    parser.add_argument("--mincutoff", type=float, default=1.0)
+    parser.add_argument("--beta", type=float, default=0.012)
+    parser.add_argument("--deadzone", type=float, default=1.5)
+    parser.add_argument("--scroll-speed", type=float, default=90.0)
+    parser.add_argument("--scroll-interval", type=float, default=0.03)
+    parser.add_argument("--scroll-invert", action="store_true")
+    parser.add_argument("--stable-frames", type=int, default=3)
+    parser.add_argument("--min-hold", type=float, default=0.15)
+    parser.add_argument("--pause-hold", type=float, default=0.4)
+    parser.add_argument("--resume-hold", type=float, default=0.8)
+    parser.add_argument("--cursor-source", choices=["tip", "mcp"], default="tip")
+    parser.add_argument("--pinch-latch", type=float, default=0.42)
+    parser.add_argument("--pinch-unlatch", type=float, default=0.52)
+    parser.add_argument("--drag-hold", type=float, default=0.35)
+    parser.add_argument("--click-hold", type=float, default=0.12)
+    parser.add_argument("--click-context", type=float, default=0.6)
     args = parser.parse_args()
+
+    if args.headless and not args.dry_run:
+        raise SystemExit("--headless requires --dry-run; use the windowed mode "
+                         "for real mouse control")
 
     cap = open_camera(args.camera)
     landmarker = build_landmarker()
     rules = GestureRules()
-    stabilizer = Stabilizer()
+    stabilizer = Stabilizer(enter_frames=args.stable_frames,
+                            exit_frames=args.stable_frames,
+                            min_hold_s=args.min_hold)
     velocity = PalmVelocity()
+    controller = MouseController(dry_run=args.dry_run,
+                                 drag_hold_s=args.drag_hold,
+                                 click_min_hold_s=args.click_hold,
+                                 click_context_s=args.click_context,
+                                 deadzone_px=args.deadzone,
+                                 scroll_speed=args.scroll_speed,
+                                 scroll_interval_s=args.scroll_interval,
+                                 scroll_invert=args.scroll_invert,
+                                 mincutoff=args.mincutoff,
+                                 beta=args.beta,
+                                 cursor_source=args.cursor_source,
+                                 pinch_latch=args.pinch_latch,
+                                 pinch_unlatch=args.pinch_unlatch)
+    mapper = FixedRegionMapper(tuple(args.active_x), tuple(args.active_y))
+    state = "RUNNING"
 
     print(f"camera {args.camera} | backend {cap.getBackendName()} | "
           f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
           f"{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
+    print(f"control {'DRY-RUN' if args.dry_run else 'LIVE'} | "
+          f"screen {controller.screen_w}x{controller.screen_h}")
+    print(f"active x {args.active_x} y {args.active_y} | "
+          f"one-euro mincutoff={args.mincutoff} beta={args.beta}")
+    print(f"stabilizer frames={args.stable_frames} min_hold={args.min_hold}s | "
+          f"pause {args.pause_hold}s | resume {args.resume_hold}s")
+    print(f"cursor {args.cursor_source} | latch pinch<{args.pinch_latch} "
+          f"unlatch >{args.pinch_unlatch}")
 
     frame_times: deque[float] = deque(maxlen=30)
     label_count: Counter = Counter()
@@ -382,6 +453,27 @@ def main() -> None:
                 n_switches += 1
                 prev_stable = stable
 
+            try:
+                if feat is None:
+                    controller.on_hand_lost()
+
+                if state == "RUNNING":
+                    if stable == "FIST" and stabilizer.held(now) >= args.pause_hold:
+                        controller.pause()
+                        state = "PAUSED"
+                    else:
+                        controller.update(stable, feat, mapper,
+                                          frame.shape[1], frame.shape[0], now)
+                elif state == "PAUSED":
+                    if stable == "OPEN" and stabilizer.held(now) >= args.resume_hold:
+                        controller.resume()
+                        state = "RUNNING"
+            except Exception as exc:  # pyautogui.FailSafeException
+                if type(exc).__name__ == "FailSafeException":
+                    print("pyautogui FAILSAFE triggered; stopping")
+                    break
+                raise
+
             frame_times.append(now)
             if first_frame_t is None:
                 first_frame_t = now
@@ -400,18 +492,35 @@ def main() -> None:
                     pinch = f"{feat.pinch:.2f}" if feat is not None else "-"
                     bits = ("".join("1" if f else "0" for f in feat.fingers)
                             if feat is not None else "-")
+                    action = controller.current_action(now, stable)
                     print(f"  frame {n:4d} | fps {fps:5.1f} | "
-                          f"{raw:5s} -> {stable:5s} | pinch {pinch} | {bits}")
+                          f"{raw:5s} -> {stable:5s} | {state:6s} {action:10s} | "
+                          f"pinch {pinch} | {bits}")
             else:
+                rx0, ry0, rx1, ry1 = mapper.region_px(frame.shape[1], frame.shape[0])
+                cv2.rectangle(frame, (rx0, ry0), (rx1, ry1), (90, 90, 90), 1)
                 draw_result(frame, result, feat, raw, stable,
-                            fps, detect_ms, n_switches)
+                            fps, detect_ms, n_switches, state,
+                            controller.current_action(now, stable),
+                            controller.cursor)
                 cv2.imshow("V0 preview", frame)
-                if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q")):
                     break
+                if key == ord("r"):
+                    controller.resume()
+                    state = "RUNNING"
+                if key == ord("p"):
+                    controller.pause()
+                    state = "PAUSED"
 
             if args.frames and n >= args.frames:
                 break
     finally:
+        try:
+            controller.release_all()
+        except Exception:
+            pass
         cap.release()
         landmarker.close()
         cv2.destroyAllWindows()
