@@ -1,6 +1,10 @@
 # Normalize text files, keep binaries untouched
 * text=auto
 
+# Shell / PBS scripts must keep LF on the Linux cluster
+*.sh  text eol=lf
+*.pbs text eol=lf
+
 *.pdf  binary
 *.png  binary
 *.jpg  binary

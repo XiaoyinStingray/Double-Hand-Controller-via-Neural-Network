@@ -1,0 +1,22 @@
+#!/bin/bash
+# Submit from the repo root on gwork:
+#   cd /ghome/zhaojy/tasks/HandGesture && qsub scripts/cluster/train_pose.pbs
+# Do NOT add -q. Do NOT set CUDA_VISIBLE_DEVICES here.
+
+#PBS -N hand_pose
+#PBS -o /gdata1/zhaojy/exp/logs/${PBS_JOBID}.out
+#PBS -e /gdata1/zhaojy/exp/logs/${PBS_JOBID}.err
+#PBS -l nodes=1:gpus=1:A
+#PBS -l walltime=24:00:00
+#PBS -r y
+
+cd $PBS_O_WORKDIR
+
+startdocker \
+    -P /ghome/zhaojy \
+    -D /gdata1/zhaojy/ \
+    -u "--shm-size 32G -e HOME=/gdata1/zhaojy" \
+    -c "/bin/bash /ghome/zhaojy/tasks/HandGesture/scripts/cluster/run_train_pose.sh" \
+    bit:5000/zhaojy_video:cu118-py311-v2
+
+echo "Done: $(date)"
