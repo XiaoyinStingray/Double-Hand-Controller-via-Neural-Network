@@ -7,6 +7,9 @@ WORK=/dev/shm/ipn_pose
 REPO=/ghome/zhaojy/tasks/HandGesture
 PY=/gdata1/zhaojy/envs/hand/bin/python
 
+export TMPDIR=/dev/shm/tmp
+mkdir -p "$TMPDIR"
+
 rm -rf "$WORK"
 mkdir -p "$WORK"
 echo "[$(date)] extracting $TAR"

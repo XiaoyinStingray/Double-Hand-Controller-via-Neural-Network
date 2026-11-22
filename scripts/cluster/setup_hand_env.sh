@@ -7,6 +7,10 @@ set -euo pipefail
 ENV=/gdata1/zhaojy/envs/hand
 BASE=/opt/venv/lib/python3.11/site-packages
 
+# The image has no usable /tmp; use the container's tmpfs for pip scratch.
+export TMPDIR=/dev/shm/tmp
+mkdir -p "$TMPDIR"
+
 mkdir -p /gdata1/zhaojy/envs
 if [ ! -x "$ENV/bin/python" ]; then
     /opt/venv/bin/python -m venv "$ENV"

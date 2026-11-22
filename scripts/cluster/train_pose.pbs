@@ -12,7 +12,7 @@
 
 cd $PBS_O_WORKDIR
 
-startdocker \
+/usr/local/sbin/startdocker \
     -P /ghome/zhaojy \
     -D /gdata1/zhaojy/ \
     -u "--shm-size 32G -e HOME=/gdata1/zhaojy" \
