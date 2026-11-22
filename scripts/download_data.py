@@ -28,7 +28,10 @@ RAW = ROOT / "data" / "raw"
 GDRIVE_IDS = {
     "annotations": "1HybcqZqnNKZGgJJXCMjj6tLFbpsNP_a1",
     "landmarks": "1pbCWxfzGZyexHe89lZtGgnHWfa958XJv",
+    # NOTE: the MP Hands file is currently 404 on Google Drive; MP Holistic
+    # contains the same hand_landmarks and is used as the MediaPipe baseline.
     "mp-hands": "1Y-3_MUHJ6OYpv-BNof5vYDRR4YNgrGQ",
+    "mp-holistic": "1hdtmr4JpK14rt1zMcbN39-oTedn2sBx1",
     "mp4": "1O4Fn_jbAEcKIksXHmQIMcHTyaDw4wt9x",
 }
 
@@ -38,12 +41,15 @@ EXPECTED_SHA256 = {
     "annotations": "520dfbf3d52ecab6535d8841bba55e94d6b512596ed1cff4505d2c1345bcbaec",
     "landmarks": "493bf53638d5b1477e28f05c41884f0cabdcb7b84f20d68f3d5d94e0b46fad4d",
     "mp-hands": "e511bb2b902207b82a296190daadc30a057f3abc16f628579542d2b1274ce598",
+    "mp-holistic": "4746db8afa7376ae647c4c61c58cba963aa22fbc3458edbc06fc88775ab972b8",
 }
 
 ZIPS = {
     "annotations": (RAW / "IPN_HandS_annotations.zip", RAW / "IPN_HandS_annotations"),
     "landmarks": (RAW / "IPN_HandS_landmarks_GT.zip", RAW / "IPN_HandS_landmarks_GT"),
     "mp-hands": (RAW / "IPN_HandS_landmarks_MPHands.zip", RAW / "IPN_HandS_landmarks_MPHands"),
+    "mp-holistic": (RAW / "IPN_HandS_landmarks_MPHolistic.zip",
+                    RAW / "IPN_HandS_landmarks_MPHolistic"),
 }
 
 VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv"}
@@ -139,7 +145,7 @@ def get_mp4(force: bool, skip_extract: bool) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", choices=["all", "annotations", "landmarks",
-                                           "mp-hands", "mp4"], default="all")
+                                           "mp-hands", "mp-holistic", "mp4"], default="all")
     parser.add_argument("--force", action="store_true", help="re-download")
     parser.add_argument("--skip-extract", action="store_true",
                         help="download mp4 tgz but do not extract")
