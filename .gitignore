@@ -225,7 +225,7 @@ __marimo__/
 # ===== Deep Learning / CV project =====
 # Datasets (always downloaded/regenerated, never committed)
 data/
-datasets/
+/datasets/
 IPN_Hand*/
 *.zip
 *.tar.gz
