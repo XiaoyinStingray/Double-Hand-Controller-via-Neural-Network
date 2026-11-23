@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 from src.features.hand_features import TrackFeatureState  # noqa: E402
 from src.features.rules import GestureRules, Stabilizer  # noqa: E402
 from src.tracking.simple_tracker import HandObservation, SimpleHandTracker  # noqa: E402
+from src.app.game import HandGame  # noqa: E402
 
 CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -135,6 +136,14 @@ def main():
     p.add_argument("--cursor-source", choices=["tip", "mcp"], default="tip")
     p.add_argument("--stable-frames", type=int, default=3)
     p.add_argument("--min-hold", type=float, default=0.15)
+    # two-hand game / mode switching
+    p.add_argument("--game", action="store_true")
+    p.add_argument("--game-lives", type=int, default=3)
+    p.add_argument("--game-duration", type=float, default=60.0)
+    p.add_argument("--game-ball-interval", type=float, default=1.1)
+    p.add_argument("--enter-hold", type=float, default=0.6)
+    p.add_argument("--exit-hold", type=float, default=0.4)
+    p.add_argument("--exit-lost", type=float, default=1.0)
     args = p.parse_args()
 
     if not args.model.exists():
@@ -196,12 +205,29 @@ def main():
         )
         mapper = FixedRegionMapper(tuple(args.active_x), tuple(args.active_y))
 
-    rules = GestureRules()
-    stabilizer = Stabilizer(enter_frames=args.stable_frames,
-                            exit_frames=args.stable_frames,
-                            min_hold_s=args.min_hold)
+    rules = {}
+    stabs = {}
+
+    def stable_of(tid, feat, now):
+        r = rules.get(tid)
+        if r is None:
+            r = rules[tid] = GestureRules()
+        s = stabs.get(tid)
+        if s is None:
+            s = stabs[tid] = Stabilizer(enter_frames=args.stable_frames,
+                                        exit_frames=args.stable_frames,
+                                        min_hold_s=args.min_hold)
+        if feat is None:
+            return s.update("NONE", now)
+        return s.update(r.update(feat), now)
+
     mouse_state = "RUNNING"
-    primary_id = None
+    game = None
+    mode = "GAME" if (args.game and not args.mouse) else "MOUSE"
+    need_reset = True
+    enter_since = None
+    lost_since = None
+    last_now = None
 
     states = {}
     last_label = {}
@@ -211,7 +237,8 @@ def main():
     n = 0
 
     print(f"model {args.model.name} | gru {'on' if use_gru else 'off'} | T={T}")
-    print(f"mouse {'on' if args.mouse else 'off'} | dry_run={args.dry_run}")
+    print(f"mouse {'on' if args.mouse else 'off'} | dry_run={args.dry_run} | "
+          f"game {'on' if args.game else 'off'} | mode {mode}")
     try:
         while True:
             ok, frame = cap.read()
@@ -263,6 +290,10 @@ def main():
 
                 if now - st.last_t > 0.10:
                     st.reset()
+                    if tr.track_id in rules:
+                        rules[tr.track_id].reset()
+                    if tr.track_id in stabs:
+                        stabs[tr.track_id].reset()
                 feat = st.update(tr.kpts, side, now)
                 if feat is not None:
                     feats[tr.track_id] = feat
@@ -284,33 +315,76 @@ def main():
                 else:
                     last_label[tr.track_id] = f"#{tr.track_id} {side[0]}"
 
+            geoms = {tr.track_id: stable_of(tr.track_id, feats.get(tr.track_id), now)
+                     for tr in tracks}
+
+            if args.game and game is None:
+                game = HandGame(frame.shape[1], frame.shape[0],
+                                max_lives=args.game_lives,
+                                duration=args.game_duration,
+                                ball_interval=args.game_ball_interval)
+                need_reset = True
+
             primary = max(tracks, key=lambda t: (t.box[0] + t.box[2]) / 2) if tracks else None
-            if primary is None:
-                primary_id = None
-            elif primary.track_id != primary_id:
-                primary_id = primary.track_id
-                rules.reset()
-                stabilizer = Stabilizer(enter_frames=args.stable_frames,
-                                        exit_frames=args.stable_frames,
-                                        min_hold_s=args.min_hold)
-
             pfeat = feats.get(primary.track_id) if primary is not None else None
-            if pfeat is not None:
-                geom = stabilizer.update(rules.update(pfeat), now)
-            else:
-                geom = stabilizer.update("NONE", now)
-                if mouse is not None:
-                    mouse.on_hand_lost()
+            geom = geoms.get(primary.track_id, "NONE") if primary is not None else "NONE"
 
-            if mouse is not None:
+            # single-hand mouse <-> two-hand game
+            if args.game:
+                if mode == "MOUSE":
+                    both_open = (len(feats) == 2 and len(geoms) == 2 and
+                                 all(g == "OPEN" for g in geoms.values()))
+                    if both_open:
+                        if enter_since is None:
+                            enter_since = now
+                        if now - enter_since >= args.enter_hold:
+                            mode = "GAME"
+                            need_reset = True
+                            enter_since = None
+                            lost_since = None
+                            if mouse is not None:
+                                mouse.on_hand_lost()
+                                mouse_state = "RUNNING"
+                    else:
+                        enter_since = None
+                else:
+                    if len(feats) < 2:
+                        if lost_since is None:
+                            lost_since = now
+                    else:
+                        lost_since = None
+                    fist_out = any(
+                        g == "FIST" and stabs[tid].held(now) >= args.exit_hold
+                        for tid, g in geoms.items())
+                    if fist_out or (lost_since is not None and
+                                    now - lost_since >= args.exit_lost):
+                        mode = "MOUSE"
+                        lost_since = None
+                        if mouse is not None:
+                            mouse.on_hand_lost()
+                            mouse_state = "RUNNING"
+
+            if mode == "GAME":
+                if need_reset:
+                    game.reset(now)
+                    need_reset = False
+                targets = {sides[tid]: f.tip[0]
+                           for tid, f in feats.items() if tid in sides}
+                game.set_targets(targets)
+                dt = 0.0 if last_now is None else now - last_now
+                game.update(now, dt)
+                last_now = now
+            elif mouse is not None:
+                if pfeat is None:
+                    mouse.on_hand_lost()
                 if mouse_state == "RUNNING":
-                    if geom == "FIST" and stabilizer.held(now) >= args.pause_hold:
+                    if geom == "FIST" and stabs[primary.track_id].held(now) >= args.pause_hold:
                         mouse.pause()
                         mouse_state = "PAUSED"
                     else:
                         mouse.update(geom, pfeat, mapper,
                                      frame.shape[1], frame.shape[0], now)
-                elif geom == "OPEN" and stabilizer.held(now) >= args.resume_hold:
+                elif geom == "OPEN" and stabs[primary.track_id].held(now) >= args.resume_hold:
                     mouse.resume()
                     mouse_state = "RUNNING"
 
@@ -319,6 +393,8 @@ def main():
                 if tid not in sides and now - states[tid].last_t > 2.0:
                     states.pop(tid, None)
                     last_label.pop(tid, None)
+                    rules.pop(tid, None)
+                    stabs.pop(tid, None)
 
             if t_first is None:
                 t_first = now
@@ -330,37 +406,58 @@ def main():
             if args.headless:
                 if n % 30 == 0:
                     lab = ", ".join(last_label.get(t.track_id, f"#{t.track_id}") for t in tracks)
-                    act = mouse.current_action(now, geom) if mouse is not None else "-"
+                    act = (mouse.current_action(now, geom)
+                           if mouse is not None and mode == "MOUSE" else "-")
+                    gs = f" {game.status()}" if (game is not None and mode == "GAME") else ""
                     print(f"frame {n:4d} | fps {fps:5.1f} | infer {infer_ms:4.1f} ms | "
                           f"gru {gru_ms:4.2f} ms | tracks {len(tracks)} | {lab} | "
-                          f"geom {geom} | {mouse_state} {act}")
+                          f"{mode}{gs} | {mouse_state} {act}")
             else:
-                draw(frame, tracks, last_label)
-                cv2.putText(frame,
-                            f"FPS {fps:5.1f}  infer {infer_ms:4.1f} ms  "
-                            f"gru {gru_ms:4.2f} ms  tracks {len(tracks)}",
-                            (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 255), 2)
-                extra = f"geom {geom}"
-                if mouse is not None:
-                    extra += f" | {mouse_state} {mouse.current_action(now, geom)}"
-                    if mouse.cursor is not None:
-                        extra += f" | {int(mouse.cursor[0])},{int(mouse.cursor[1])}"
-                cv2.putText(frame, extra, (10, 58),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 0), 2)
-                if pfeat is not None:
-                    bits = "".join("1" if f else "0" for f in pfeat.fingers)
+                if mode == "GAME":
+                    game.draw_world(frame)
+                    draw(frame, tracks, last_label)
+                    game.draw_hud(frame, now)
+                    cv2.putText(frame, f"FPS {fps:5.1f}  infer {infer_ms:4.1f} ms",
+                                (frame.shape[1] - 250, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+                    hint = "both open: paddles | fist 0.4s / hand lost: exit | g mouse | q quit"
+                else:
+                    draw(frame, tracks, last_label)
                     cv2.putText(frame,
-                                f"pinch {pfeat.pinch:.2f} dKn {pfeat.d_knuckle:.2f} "
-                                f"aIdx {pfeat.angles[1]:3.0f} {bits}",
-                                (10, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                                (220, 220, 220), 1)
-                cv2.putText(frame, "Esc/q quit | p pause | r resume",
-                            (10, frame.shape[0] - 12),
+                                f"FPS {fps:5.1f}  infer {infer_ms:4.1f} ms  "
+                                f"gru {gru_ms:4.2f} ms  tracks {len(tracks)}",
+                                (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 255), 2)
+                    extra = f"geom {geom}"
+                    if mouse is not None:
+                        extra += f" | {mouse_state} {mouse.current_action(now, geom)}"
+                        if mouse.cursor is not None:
+                            extra += f" | {int(mouse.cursor[0])},{int(mouse.cursor[1])}"
+                    cv2.putText(frame, extra, (10, 58),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 0), 2)
+                    if pfeat is not None:
+                        bits = "".join("1" if f else "0" for f in pfeat.fingers)
+                        cv2.putText(frame,
+                                    f"pinch {pfeat.pinch:.2f} dKn {pfeat.d_knuckle:.2f} "
+                                    f"aIdx {pfeat.angles[1]:3.0f} {bits}",
+                                    (10, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                    (220, 220, 220), 1)
+                    hint = "Esc/q quit | p pause | r resume"
+                    if args.game:
+                        hint += " | both hands open = game"
+                cv2.putText(frame, hint, (10, frame.shape[0] - 12),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 cv2.imshow("V1+V2 live", frame)
                 key = cv2.waitKey(1) & 0xFF
                 if key in (27, ord("q")):
                     break
+                if args.game and key == ord("g"):
+                    mode = "MOUSE" if mode == "GAME" else "GAME"
+                    need_reset = True
+                    enter_since = None
+                    lost_since = None
+                    if mouse is not None:
+                        mouse.on_hand_lost()
+                        mouse_state = "RUNNING"
                 if mouse is not None and key == ord("p"):
                     mouse.pause()
                     mouse_state = "PAUSED"

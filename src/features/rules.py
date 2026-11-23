@@ -46,6 +46,12 @@ class Stabilizer:
         self.count = 0
         self.last_change = -1e9
 
+    def reset(self):
+        self.stable = "NONE"
+        self.candidate = None
+        self.count = 0
+        self.last_change = -1e9
+
     def update(self, raw, now):
         if raw == self.stable:
             self.candidate = None

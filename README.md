@@ -3,8 +3,8 @@
 《深度学习实践》大作业，进阶题 1：基于目标检测的手势操控。
 
 用摄像头实时检测手部、识别手势，单手控制鼠标，双手控制一个小游戏。
-目前完成 V0 规则鼠标、V1 手部检测/关键点、V2 手势分类；单/双手模式切换、
-5 点校准、自采数据微调和最终部署还在做。
+目前完成 V0 规则鼠标、V1 手部检测/关键点、V2 手势分类、V1+V2 实时管线，
+以及单手鼠标和双手接球游戏；5 点校准、自采数据微调和最终部署还在做。
 
 ## 目标管线
 
@@ -36,6 +36,7 @@ src/
   models/     GRU / Transformer / TCN / MLP
   tracking/   IoU 跟踪 + EMA
   control/    光标映射、One-Euro、鼠标动作
+  app/        双手接球游戏
 scripts/      数据下载、抽帧、标签转换、训练、评估、预览、集群
 ```
 
@@ -86,6 +87,17 @@ V1 手部检测/关键点预览：
 ```bash
 python scripts/preview_pose.py
 ```
+
+V1+V2 实时管线（YOLO-pose → 跟踪 → GRU，再接几何鼠标）：
+
+```bash
+python scripts/v1v2_live.py --mouse --dry-run   # 先 dry-run
+python scripts/v1v2_live.py --mouse             # 实际控制鼠标
+python scripts/v1v2_live.py --game --mouse      # 同时启用双手接球游戏
+```
+
+游戏模式：双手张开 0.6 s 进入（左手/右手各控制一个挡板），握拳 0.4 s 或
+一只手离开 1 s 退出回鼠标；`g` 手动切换，`q` 退出。
 
 训练 / 评估：
 
