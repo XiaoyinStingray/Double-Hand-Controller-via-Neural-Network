@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 from src.features.hand_features import TrackFeatureState  # noqa: E402
 from src.features.rules import GestureRules, Stabilizer  # noqa: E402
 from src.tracking.simple_tracker import HandObservation, SimpleHandTracker  # noqa: E402
-from src.app.game import HandGame  # noqa: E402
+from src.app.game import AirHockey  # noqa: E402
 
 CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -138,9 +138,9 @@ def main():
     p.add_argument("--min-hold", type=float, default=0.15)
     # two-hand game / mode switching
     p.add_argument("--game", action="store_true")
-    p.add_argument("--game-lives", type=int, default=3)
-    p.add_argument("--game-duration", type=float, default=60.0)
-    p.add_argument("--game-ball-interval", type=float, default=1.1)
+    p.add_argument("--hockey-target", type=int, default=5)
+    p.add_argument("--hockey-time", type=float, default=90.0)
+    p.add_argument("--hockey-speed", type=float, default=320.0)
     p.add_argument("--enter-hold", type=float, default=0.6)
     p.add_argument("--exit-hold", type=float, default=0.4)
     p.add_argument("--exit-lost", type=float, default=1.0)
@@ -228,6 +228,9 @@ def main():
     enter_since = None
     lost_since = None
     last_now = None
+    act_x0, act_x1 = args.active_x
+    act_y0, act_y1 = args.active_y
+    act_mid = (act_x0 + act_x1) / 2.0
 
     states = {}
     last_label = {}
@@ -319,10 +322,10 @@ def main():
                      for tr in tracks}
 
             if args.game and game is None:
-                game = HandGame(frame.shape[1], frame.shape[0],
-                                max_lives=args.game_lives,
-                                duration=args.game_duration,
-                                ball_interval=args.game_ball_interval)
+                game = AirHockey(frame.shape[1], frame.shape[0],
+                                 target=args.hockey_target,
+                                 duration=args.hockey_time,
+                                 base_speed=args.hockey_speed)
                 need_reset = True
 
             primary = max(tracks, key=lambda t: (t.box[0] + t.box[2]) / 2) if tracks else None
@@ -368,8 +371,19 @@ def main():
                 if need_reset:
                     game.reset(now)
                     need_reset = False
-                targets = {sides[tid]: f.tip[0]
-                           for tid, f in feats.items() if tid in sides}
+                targets = {}
+                for tid, f in feats.items():
+                    side = sides.get(tid)
+                    if side is None:
+                        continue
+                    tx = f.tip[0] / max(frame.shape[1], 1)
+                    ty = f.tip[1] / max(frame.shape[0], 1)
+                    if side == "Left":
+                        u = (tx - act_x0) / max(act_mid - act_x0, 1e-6)
+                    else:
+                        u = (tx - act_mid) / max(act_x1 - act_mid, 1e-6)
+                    v = (ty - act_y0) / max(act_y1 - act_y0, 1e-6)
+                    targets[side] = (u, v)
                 game.set_targets(targets)
                 dt = 0.0 if last_now is None else now - last_now
                 game.update(now, dt)
@@ -444,7 +458,8 @@ def main():
                     hint = "Esc/q quit | p pause | r resume"
                     if args.game:
                         hint += " | both hands open = game"
-                cv2.putText(frame, hint, (10, frame.shape[0] - 12),
+                hint_y = frame.shape[0] - 34 if mode == "GAME" else frame.shape[0] - 12
+                cv2.putText(frame, hint, (10, hint_y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 cv2.imshow("V1+V2 live", frame)
                 key = cv2.waitKey(1) & 0xFF

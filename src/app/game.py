@@ -1,170 +1,231 @@
-"""Two-hand catch game rendered on top of the camera frame.
+"""Two-hand air hockey rendered on top of the camera frame.
 
-Left/right hand x controls the left/right paddle. Balls fall in each half;
-catching one scores, missing costs a life. No extra dependency beyond OpenCV.
+Each hand defends one side: the left hand moves the left paddle, the right hand
+moves the right paddle. The puck bounces off the top/bottom walls and the
+paddles; first to `target` goals wins. Paddle motion adds momentum to the puck.
 """
 
-from dataclasses import dataclass
+from collections import deque
 import math
 import random
 
 import cv2
 
-BALL_R = 9
-PADDLE_W = 110
-PADDLE_H = 14
+PUCK_R = 11
+PADDLE_R = 26
+GOAL_H = 160
 
 
-@dataclass
-class Ball:
-    x: float
-    y: float
-    vy: float
-    side: str
-
-
-class HandGame:
+class AirHockey:
     def __init__(self, width: int, height: int,
-                 max_lives: int = 3,
-                 duration: float = 60.0,
-                 ball_interval: float = 1.1,
-                 base_speed: float = 150.0,
-                 speed_gain: float = 7.0,
-                 max_speed: float = 360.0,
+                 target: int = 5,
+                 duration: float = 90.0,
+                 base_speed: float = 320.0,
+                 max_speed: float = 760.0,
                  seed: int = 0):
         self.w = int(width)
         self.h = int(height)
-        self.max_lives = max_lives
+        self.target = target
         self.duration = duration
-        self.ball_interval = ball_interval
         self.base_speed = base_speed
-        self.speed_gain = speed_gain
         self.max_speed = max_speed
         self.rng = random.Random(seed)
-        self.paddle_y = self.h - 34.0
-        self.paddle_x = {"Left": self.w * 0.25, "Right": self.w * 0.75}
-        self.target = dict(self.paddle_x)
-        self.balls = []
-        self.score = 0
-        self.lives = max_lives
-        self.over = False
-        self.over_t = 0.0
-        self.start_t = 0.0
-        self.next_spawn = 0.0
-        self.spawn_side = "Left"
+        self.trail = deque(maxlen=12)
+        self.reset(0.0)
 
     # ---------------- state ----------------
     def reset(self, now: float) -> None:
-        self.paddle_x = {"Left": self.w * 0.25, "Right": self.w * 0.75}
-        self.target = dict(self.paddle_x)
-        self.balls = []
-        self.score = 0
-        self.lives = self.max_lives
-        self.over = False
+        self.score = {"Left": 0, "Right": 0}
+        self.paddle = {"Left": [self.w * 0.25, self.h * 0.5],
+                       "Right": [self.w * 0.75, self.h * 0.5]}
+        self.paddle_v = {"Left": [0.0, 0.0], "Right": [0.0, 0.0]}
+        self.target_pos = {"Left": list(self.paddle["Left"]),
+                           "Right": list(self.paddle["Right"])}
+        self.puck = [self.w * 0.5, self.h * 0.5]
+        self.puck_v = [0.0, 0.0]
+        self.trail.clear()
+        self.serve_dir = 1 if self.rng.random() < 0.5 else -1
+        self.serve_at = now + 1.2
         self.start_t = now
-        self.next_spawn = now + 0.8
-        self.spawn_side = "Left"
+        self.over = False
+        self.over_t = 0.0
+        self.winner = ""
 
     def set_targets(self, targets) -> None:
-        for side, x in targets.items():
-            lo, hi = self._limits(side)
-            self.target[side] = min(max(float(x), lo), hi)
-
-    def _limits(self, side: str):
-        half = self.w / 2.0
-        lo = PADDLE_W / 2.0 + 4.0
-        hi = half - PADDLE_W / 2.0 - 4.0
-        if side == "Right":
-            lo += half
-            hi += half
-        return lo, hi
-
-    def _spawn(self, now: float) -> None:
-        side = self.spawn_side
-        self.spawn_side = "Right" if side == "Left" else "Left"
-        lo, hi = self._limits(side)
-        x = self.rng.uniform(lo + BALL_R, hi - BALL_R)
-        speed = min(self.base_speed + self.speed_gain * self.score, self.max_speed)
-        self.balls.append(Ball(x, -BALL_R, speed, side))
-        self.next_spawn = now + self.ball_interval
+        """targets: {side: (u, v)} with u,v in [0,1] over that side's region."""
+        for side, (u, v) in targets.items():
+            u = min(max(float(u), 0.0), 1.0)
+            v = min(max(float(v), 0.0), 1.0)
+            half = self.w / 2.0
+            x0 = PADDLE_R if side == "Left" else half + PADDLE_R
+            x1 = half - PADDLE_R if side == "Left" else self.w - PADDLE_R
+            y0, y1 = PADDLE_R, self.h - PADDLE_R
+            self.target_pos[side][0] = x0 + u * (x1 - x0)
+            self.target_pos[side][1] = y0 + v * (y1 - y0)
 
     def _finish(self, now: float) -> None:
         self.over = True
         self.over_t = now
+        if self.score["Left"] > self.score["Right"]:
+            self.winner = "LEFT"
+        elif self.score["Right"] > self.score["Left"]:
+            self.winner = "RIGHT"
+        else:
+            self.winner = "DRAW"
+
+    def _goal(self, scorer: str, now: float) -> None:
+        self.score[scorer] += 1
+        if self.score[scorer] >= self.target:
+            self._finish(now)
+            return
+        self.puck = [self.w * 0.5, self.h * 0.5]
+        self.puck_v = [0.0, 0.0]
+        self.trail.clear()
+        self.serve_dir = -1 if scorer == "Right" else 1
+        self.serve_at = now + 1.0
 
     # ---------------- per-frame ----------------
     def update(self, now: float, dt: float) -> None:
         if self.over:
-            if now - self.over_t >= 3.0:
+            if now - self.over_t >= 4.0:
                 self.reset(now)
             return
 
         dt = min(max(dt, 0.0), 0.10)
-        alpha = 1.0 - math.exp(-dt / 0.08)
-        for side in ("Left", "Right"):
-            self.paddle_x[side] += alpha * (self.target[side] - self.paddle_x[side])
-
         if now - self.start_t >= self.duration:
             self._finish(now)
             return
-        if now >= self.next_spawn:
-            self._spawn(now)
 
-        alive = []
-        for b in self.balls:
-            b.y += b.vy * dt
-            if b.y + BALL_R < self.paddle_y:
-                alive.append(b)
-                continue
-            if abs(b.x - self.paddle_x[b.side]) <= PADDLE_W / 2.0 + BALL_R:
-                self.score += 1
-                continue
-            if b.y - BALL_R > self.h:
-                self.lives -= 1
-                if self.lives <= 0:
-                    self._finish(now)
-                    return
-                continue
-            alive.append(b)
-        self.balls = alive
+        alpha = 1.0 - math.exp(-dt / 0.06)
+        for side in ("Left", "Right"):
+            px, py = self.paddle[side]
+            tx, ty = self.target_pos[side]
+            nx = px + alpha * (tx - px)
+            ny = py + alpha * (ty - py)
+            if dt > 0:
+                k = 1.0 - math.exp(-dt / 0.08)
+                self.paddle_v[side][0] += k * ((nx - px) / dt - self.paddle_v[side][0])
+                self.paddle_v[side][1] += k * ((ny - py) / dt - self.paddle_v[side][1])
+            self.paddle[side] = [nx, ny]
+
+        if now < self.serve_at:
+            return
+        if self.puck_v[0] == 0.0 and self.puck_v[1] == 0.0:
+            self.puck_v = [self.serve_dir * self.base_speed,
+                           self.rng.uniform(-0.30, 0.30) * self.base_speed]
+
+        self.puck[0] += self.puck_v[0] * dt
+        self.puck[1] += self.puck_v[1] * dt
+        self.trail.append((self.puck[0], self.puck[1]))
+
+        if self.puck[1] - PUCK_R < 0:
+            self.puck[1] = PUCK_R
+            self.puck_v[1] = abs(self.puck_v[1])
+        elif self.puck[1] + PUCK_R > self.h:
+            self.puck[1] = self.h - PUCK_R
+            self.puck_v[1] = -abs(self.puck_v[1])
+
+        for side in ("Left", "Right"):
+            self._hit_paddle(side)
+
+        if self.puck[0] - PUCK_R < 0:
+            self._goal("Right", now)
+        elif self.puck[0] + PUCK_R > self.w:
+            self._goal("Left", now)
+
+    def _hit_paddle(self, side: str) -> None:
+        px, py = self.paddle[side]
+        dx = self.puck[0] - px
+        dy = self.puck[1] - py
+        dist = math.hypot(dx, dy)
+        r_sum = PUCK_R + PADDLE_R
+        if dist >= r_sum:
+            return
+        if dist < 1e-6:
+            nx, ny = (1.0 if side == "Left" else -1.0), 0.0
+        else:
+            nx, ny = dx / dist, dy / dist
+
+        self.puck[0] = px + nx * (r_sum + 0.5)
+        self.puck[1] = py + ny * (r_sum + 0.5)
+
+        vn = self.puck_v[0] * nx + self.puck_v[1] * ny
+        if vn < 0:
+            self.puck_v[0] -= 2 * vn * nx
+            self.puck_v[1] -= 2 * vn * ny
+
+        pvx, pvy = self.paddle_v[side]
+        pvn = pvx * nx + pvy * ny
+        self.puck_v[0] += 0.8 * pvn * nx
+        self.puck_v[1] += 0.8 * pvn * ny
+
+        speed = math.hypot(self.puck_v[0], self.puck_v[1])
+        if speed < 1e-6:
+            self.puck_v = [nx * self.base_speed, ny * self.base_speed]
+            return
+        speed = min(speed * 1.04, self.max_speed)
+        scale = speed / math.hypot(self.puck_v[0], self.puck_v[1])
+        self.puck_v[0] *= scale
+        self.puck_v[1] *= scale
 
     # ---------------- drawing ----------------
     def draw_world(self, frame) -> None:
-        frame[:] = (frame * 0.55).astype(frame.dtype)
-        mid = self.w // 2
-        for y in range(0, self.h, 24):
-            cv2.line(frame, (mid, y), (mid, y + 12), (90, 90, 90), 1)
-
+        frame[:] = (frame * 0.50).astype(frame.dtype)
         colors = {"Left": (0, 200, 255), "Right": (255, 160, 0)}
-        for side, x in self.paddle_x.items():
-            x0 = int(x - PADDLE_W / 2)
-            x1 = int(x + PADDLE_W / 2)
-            y0 = int(self.paddle_y)
-            cv2.rectangle(frame, (x0, y0), (x1, y0 + PADDLE_H),
-                          colors[side], -1)
-            cv2.putText(frame, side[0], (int(x) - 6, y0 - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, colors[side], 1)
 
-        for b in self.balls:
-            p = (int(b.x), int(b.y))
-            cv2.circle(frame, p, BALL_R + 2, (0, 140, 255), 1)
-            cv2.circle(frame, p, BALL_R, (0, 255, 255), -1)
+        cv2.rectangle(frame, (2, 2), (self.w - 3, self.h - 3), (70, 70, 70), 2)
+        mid = self.w // 2
+        for y in range(0, self.h, 26):
+            cv2.line(frame, (mid, y), (mid, y + 13), (70, 70, 70), 1)
+        cv2.circle(frame, (mid, self.h // 2), 60, (70, 70, 70), 1)
+
+        gy0 = self.h // 2 - GOAL_H // 2
+        gy1 = self.h // 2 + GOAL_H // 2
+        cv2.line(frame, (3, gy0), (3, gy1), colors["Left"], 6)
+        cv2.line(frame, (self.w - 4, gy0), (self.w - 4, gy1), colors["Right"], 6)
+
+        for i, (tx, ty) in enumerate(self.trail):
+            a = (i + 1) / len(self.trail)
+            cv2.circle(frame, (int(tx), int(ty)), max(2, int(PUCK_R * a)),
+                       (0, 140, 200), -1)
+
+        for side in ("Left", "Right"):
+            px, py = self.paddle[side]
+            cv2.circle(frame, (int(px), int(py)), PADDLE_R, colors[side], -1)
+            cv2.circle(frame, (int(px), int(py)), PADDLE_R, (255, 255, 255), 2)
+
+        cv2.circle(frame, (int(self.puck[0]), int(self.puck[1])), PUCK_R + 2,
+                   (0, 0, 0), -1)
+        cv2.circle(frame, (int(self.puck[0]), int(self.puck[1])), PUCK_R,
+                   (0, 255, 255), -1)
 
     def draw_hud(self, frame, now: float) -> None:
+        text = f"L {self.score['Left']} : {self.score['Right']} R"
+        size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
+        org = ((self.w - size[0]) // 2, 36)
+        cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                    (0, 0, 0), 5)
+        cv2.putText(frame, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+                    (255, 255, 255), 2)
+
         left = max(0.0, self.duration - (now - self.start_t))
-        text = f"SCORE {self.score}   LIVES {self.lives}   TIME {left:4.1f}s"
-        cv2.putText(frame, text, (12, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 0, 0), 4)
-        cv2.putText(frame, text, (12, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (255, 255, 255), 2)
+        hint = f"first to {self.target}  |  {left:4.1f}s"
+        cv2.putText(frame, hint, (12, self.h - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (190, 190, 190), 1)
+
         if self.over:
-            msg = f"GAME OVER   SCORE {self.score}"
-            size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)[0]
+            msg = f"{self.winner} WINS  {self.score['Left']} : {self.score['Right']}"
+            size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.95, 3)[0]
             org = ((self.w - size[0]) // 2, self.h // 2)
-            cv2.putText(frame, msg, org, cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+            cv2.putText(frame, msg, org, cv2.FONT_HERSHEY_SIMPLEX, 0.95,
                         (0, 0, 0), 6)
-            cv2.putText(frame, msg, org, cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+            cv2.putText(frame, msg, org, cv2.FONT_HERSHEY_SIMPLEX, 0.95,
                         (0, 255, 255), 3)
+        elif now < self.serve_at:
+            msg = "READY"
+            size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+            cv2.putText(frame, msg, ((self.w - size[0]) // 2, self.h // 2 + 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
 
     def draw(self, frame, now: float) -> None:
         self.draw_world(frame)
@@ -172,4 +233,4 @@ class HandGame:
 
     def status(self) -> str:
         state = "OVER" if self.over else "PLAY"
-        return f"{state} score {self.score} lives {self.lives}"
+        return f"{state} L{self.score['Left']}:{self.score['Right']}R"
