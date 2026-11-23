@@ -27,6 +27,7 @@ def _angle(a, b):
 @dataclass
 class HandFeatures:
     side: str
+    pts: np.ndarray        # (21,2) raw pixels
     q: np.ndarray          # (21,2) wrist-origin, palm-scaled, mirrored
     vel: np.ndarray        # (21,2) per-second
     fingers: np.ndarray    # (5,) bool
@@ -69,7 +70,7 @@ def extract_features(pts, side, prev_q, dt, v_palm):
         vel = np.clip((q - prev_q) / dt, -30.0, 30.0)
 
     palm = pts[list(PALM_IDX)].mean(axis=0)
-    return HandFeatures(side, q, vel, fingers, angles, pinch, d_knuckle,
+    return HandFeatures(side, pts, q, vel, fingers, angles, pinch, d_knuckle,
                         palm, pts[8], np.asarray(v_palm, dtype=np.float64))
 
 

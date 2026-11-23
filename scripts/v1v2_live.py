@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.features.hand_features import TrackFeatureState  # noqa: E402
+from src.features.rules import GestureRules, Stabilizer  # noqa: E402
 from src.tracking.simple_tracker import HandObservation, SimpleHandTracker  # noqa: E402
 
 CONNECTIONS = [
@@ -106,6 +107,29 @@ def main():
     p.add_argument("--headless", action="store_true")
     p.add_argument("--frames", type=int, default=0)
     p.add_argument("--no-gru", action="store_true")
+    # hybrid mouse layer
+    p.add_argument("--mouse", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--active-x", type=float, nargs=2, default=(0.25, 0.75),
+                   metavar=("X0", "X1"))
+    p.add_argument("--active-y", type=float, nargs=2, default=(0.30, 0.70),
+                   metavar=("Y0", "Y1"))
+    p.add_argument("--mincutoff", type=float, default=1.0)
+    p.add_argument("--beta", type=float, default=0.012)
+    p.add_argument("--deadzone", type=float, default=1.5)
+    p.add_argument("--scroll-speed", type=float, default=90.0)
+    p.add_argument("--scroll-interval", type=float, default=0.03)
+    p.add_argument("--scroll-invert", action="store_true")
+    p.add_argument("--pinch-latch", type=float, default=0.42)
+    p.add_argument("--pinch-unlatch", type=float, default=0.52)
+    p.add_argument("--drag-hold", type=float, default=0.35)
+    p.add_argument("--click-hold", type=float, default=0.12)
+    p.add_argument("--click-context", type=float, default=0.6)
+    p.add_argument("--pause-hold", type=float, default=0.4)
+    p.add_argument("--resume-hold", type=float, default=0.8)
+    p.add_argument("--cursor-source", choices=["tip", "mcp"], default="tip")
+    p.add_argument("--stable-frames", type=int, default=3)
+    p.add_argument("--min-hold", type=float, default=0.15)
     args = p.parse_args()
 
     if not args.model.exists():
@@ -137,6 +161,38 @@ def main():
     tracker = SimpleHandTracker(max_tracks=args.max_tracks,
                                 min_hits=args.min_hits,
                                 max_age=args.max_age)
+
+    if args.headless and args.mouse and not args.dry_run:
+        raise SystemExit("--headless with --mouse requires --dry-run")
+    mouse = None
+    mapper = None
+    if args.mouse:
+        from src.control.cursor import FixedRegionMapper
+        from src.control.mouse import MouseController
+        mouse = MouseController(
+            dry_run=args.dry_run,
+            drag_hold_s=args.drag_hold,
+            click_min_hold_s=args.click_hold,
+            click_context_s=args.click_context,
+            deadzone_px=args.deadzone,
+            scroll_speed=args.scroll_speed,
+            scroll_interval_s=args.scroll_interval,
+            scroll_invert=args.scroll_invert,
+            mincutoff=args.mincutoff,
+            beta=args.beta,
+            cursor_source=args.cursor_source,
+            pinch_latch=args.pinch_latch,
+            pinch_unlatch=args.pinch_unlatch,
+        )
+        mapper = FixedRegionMapper(tuple(args.active_x), tuple(args.active_y))
+
+    rules = GestureRules()
+    stabilizer = Stabilizer(enter_frames=args.stable_frames,
+                            exit_frames=args.stable_frames,
+                            min_hold_s=args.min_hold)
+    mouse_state = "RUNNING"
+    primary_id = None
+
     states = {}
     last_label = {}
     times = deque(maxlen=30)
@@ -145,6 +201,7 @@ def main():
     n = 0
 
     print(f"model {args.model.name} | gru {'on' if use_gru else 'off'} | T={T}")
+    print(f"mouse {'on' if args.mouse else 'off'} | dry_run={args.dry_run}")
     try:
         while True:
             ok, frame = cap.read()
@@ -179,6 +236,7 @@ def main():
             tracks = tracker.update(obs, now)
             sides = assign_sides(tracks)
             gru_ms = 0.0
+            feats = {}
 
             for tr in tracks:
                 side = sides.get(tr.track_id, "Right")
@@ -195,7 +253,9 @@ def main():
 
                 if now - st.last_t > 0.10:
                     st.reset()
-                st.update(tr.kpts, side, now)
+                feat = st.update(tr.kpts, side, now)
+                if feat is not None:
+                    feats[tr.track_id] = feat
 
                 if use_gru and st.ready():
                     t1 = time.perf_counter()
@@ -214,6 +274,36 @@ def main():
                 else:
                     last_label[tr.track_id] = f"#{tr.track_id} {side[0]}"
 
+            primary = max(tracks, key=lambda t: (t.box[0] + t.box[2]) / 2) if tracks else None
+            if primary is None:
+                primary_id = None
+            elif primary.track_id != primary_id:
+                primary_id = primary.track_id
+                rules.reset()
+                stabilizer = Stabilizer(enter_frames=args.stable_frames,
+                                        exit_frames=args.stable_frames,
+                                        min_hold_s=args.min_hold)
+
+            pfeat = feats.get(primary.track_id) if primary is not None else None
+            if pfeat is not None:
+                geom = stabilizer.update(rules.update(pfeat), now)
+            else:
+                geom = stabilizer.update("NONE", now)
+                if mouse is not None:
+                    mouse.on_hand_lost()
+
+            if mouse is not None:
+                if mouse_state == "RUNNING":
+                    if geom == "FIST" and stabilizer.held(now) >= args.pause_hold:
+                        mouse.pause()
+                        mouse_state = "PAUSED"
+                    else:
+                        mouse.update(geom, pfeat, mapper,
+                                     frame.shape[1], frame.shape[0], now)
+                elif geom == "OPEN" and stabilizer.held(now) >= args.resume_hold:
+                    mouse.resume()
+                    mouse_state = "RUNNING"
+
             # clean stale per-track states
             for tid in list(states):
                 if tid not in sides and now - states[tid].last_t > 2.0:
@@ -230,19 +320,36 @@ def main():
             if args.headless:
                 if n % 30 == 0:
                     lab = ", ".join(last_label.get(t.track_id, f"#{t.track_id}") for t in tracks)
+                    act = mouse.current_action(now, geom) if mouse is not None else "-"
                     print(f"frame {n:4d} | fps {fps:5.1f} | infer {infer_ms:4.1f} ms | "
-                          f"gru {gru_ms:4.2f} ms | tracks {len(tracks)} | {lab}")
+                          f"gru {gru_ms:4.2f} ms | tracks {len(tracks)} | {lab} | "
+                          f"geom {geom} | {mouse_state} {act}")
             else:
                 draw(frame, tracks, last_label)
                 cv2.putText(frame,
                             f"FPS {fps:5.1f}  infer {infer_ms:4.1f} ms  "
                             f"gru {gru_ms:4.2f} ms  tracks {len(tracks)}",
                             (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 255), 2)
-                cv2.putText(frame, "Esc / q: quit", (10, frame.shape[0] - 12),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
+                extra = f"geom {geom}"
+                if mouse is not None:
+                    extra += f" | {mouse_state} {mouse.current_action(now, geom)}"
+                    if mouse.cursor is not None:
+                        extra += f" | {int(mouse.cursor[0])},{int(mouse.cursor[1])}"
+                cv2.putText(frame, extra, (10, 58),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 0), 2)
+                cv2.putText(frame, "Esc/q quit | p pause | r resume",
+                            (10, frame.shape[0] - 12),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 cv2.imshow("V1+V2 live", frame)
-                if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord("q")):
                     break
+                if mouse is not None and key == ord("p"):
+                    mouse.pause()
+                    mouse_state = "PAUSED"
+                if mouse is not None and key == ord("r"):
+                    mouse.resume()
+                    mouse_state = "RUNNING"
 
             if args.frames and n >= args.frames:
                 break
