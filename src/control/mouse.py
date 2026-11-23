@@ -40,9 +40,10 @@ class MouseController:
                  click_min_hold_s: float = 0.04,
                  click_context_s: float = 0.6,
                  deadzone_px: float = 1.5,
-                 scroll_gain: float = 0.12,
+                 scroll_gain: float = 0.2,
                  scroll_deadzone: float = 12.0,
-                 scroll_max_ticks: int = 5,
+                 scroll_expo: float = 1.5,
+                 scroll_max_speed: float = 60.0,
                  scroll_invert: bool = False,
                  mincutoff: float = 1.0,
                  beta: float = 0.012,
@@ -60,7 +61,8 @@ class MouseController:
         self.deadzone_px = deadzone_px
         self.scroll_gain = scroll_gain
         self.scroll_deadzone = scroll_deadzone
-        self.scroll_max_ticks = max(1, int(scroll_max_ticks))
+        self.scroll_expo = scroll_expo
+        self.scroll_max_speed = scroll_max_speed
         self.scroll_invert = scroll_invert
         self.cursor_source = cursor_source
         self.pinch_latch = pinch_latch
@@ -298,13 +300,12 @@ class MouseController:
                 self.scroll_accum = 0.0
             else:
                 dt = min(max(now - self.scroll_prev_t, 0.0), 0.10)
-                speed = self.scroll_gain * (abs(offset) - self.scroll_deadzone)
+                speed = self.scroll_gain * (abs(offset) - self.scroll_deadzone) ** self.scroll_expo
+                speed = min(speed, self.scroll_max_speed)
                 self.scroll_accum += math.copysign(speed, offset) * dt
                 ticks = int(self.scroll_accum)
                 if ticks:
                     self.scroll_accum -= ticks
-                    ticks = max(-self.scroll_max_ticks,
-                                min(self.scroll_max_ticks, ticks))
                     if self.scroll_invert:
                         ticks = -ticks
                     self._scroll(ticks)

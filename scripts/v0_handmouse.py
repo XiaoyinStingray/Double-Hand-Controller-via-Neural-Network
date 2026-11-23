@@ -344,9 +344,10 @@ def main() -> None:
     parser.add_argument("--mincutoff", type=float, default=1.0)
     parser.add_argument("--beta", type=float, default=0.012)
     parser.add_argument("--deadzone", type=float, default=1.5)
-    parser.add_argument("--scroll-gain", type=float, default=0.12)
+    parser.add_argument("--scroll-gain", type=float, default=0.2)
     parser.add_argument("--scroll-deadzone", type=float, default=12.0)
-    parser.add_argument("--scroll-max-ticks", type=int, default=5)
+    parser.add_argument("--scroll-expo", type=float, default=1.5)
+    parser.add_argument("--scroll-max-speed", type=float, default=60.0)
     parser.add_argument("--scroll-invert", action="store_true")
     parser.add_argument("--stable-frames", type=int, default=3)
     parser.add_argument("--min-hold", type=float, default=0.15)
@@ -384,7 +385,8 @@ def main() -> None:
                                  deadzone_px=args.deadzone,
                                  scroll_gain=args.scroll_gain,
                                  scroll_deadzone=args.scroll_deadzone,
-                                 scroll_max_ticks=args.scroll_max_ticks,
+                                 scroll_expo=args.scroll_expo,
+                                 scroll_max_speed=args.scroll_max_speed,
                                  scroll_invert=args.scroll_invert,
                                  mincutoff=args.mincutoff,
                                  beta=args.beta,
