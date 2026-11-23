@@ -2,9 +2,9 @@
 
 《深度学习实践》大作业，进阶题 1：基于目标检测的手势操控。
 
-用摄像头实时检测手部、识别手势，单手控制鼠标，双手控制一个小游戏。
-目前完成 V0 规则鼠标、V1 手部检测/关键点、V2 手势分类、V1+V2 实时管线，
-以及单手鼠标和双手空气曲棍球；5 点校准、自采数据微调和最终部署还在做。
+用摄像头实时检测手部、识别手势，单手控制鼠标，双手控制小游戏：
+空气曲棍球、3D 操控台和切水果。目前完成 V0 规则鼠标、V1 手部检测/关键点、
+V2 手势分类、V1+V2 实时管线；5 点校准、自采数据微调和最终部署还在做。
 
 ## 目标管线
 
@@ -36,7 +36,7 @@ src/
   models/     GRU / Transformer / TCN / MLP
   tracking/   IoU 跟踪 + EMA
   control/    光标映射、One-Euro、鼠标动作
-  app/        双手空气曲棍球
+  app/        双手演示：空气曲棍球、3D 操控、切水果
 scripts/      数据下载、抽帧、标签转换、训练、评估、预览、集群
 ```
 
@@ -93,12 +93,17 @@ V1+V2 实时管线（YOLO-pose → 跟踪 → GRU，再接几何鼠标）：
 ```bash
 python scripts/v1v2_live.py --mouse --dry-run   # 先 dry-run
 python scripts/v1v2_live.py --mouse             # 实际控制鼠标
-python scripts/v1v2_live.py --game --mouse      # 同时启用双手空气曲棍球
+python scripts/v1v2_live.py --demo hockey --mouse   # 双手空气曲棍球
+python scripts/v1v2_live.py --demo 3d --mouse       # 双手 3D 操控
+python scripts/v1v2_live.py --demo fruit --mouse    # 双手切水果
 ```
 
-游戏模式：双手张开 0.6 s 进入，左手/右手各控制一个挡板，冰球在上下边界和
-挡板间反弹，先到 5 分获胜；握拳 0.4 s 或一只手离开 1 s 退出回鼠标，
-`g` 手动切换，`q` 退出。
+`--game` 是 `--demo hockey` 的别名。双手张开 0.6 s 进入演示，握拳 0.4 s
+或一只手离开 1 s 退出；`g` 手动切换，`r` 重置当前演示，`q` 退出。
+
+- 空气曲棍球：掌心控制挡板，先到 3 分；挡板速度会给冰球加力。
+- 3D 操控：单手捏合旋转，双手捏合移动/缩放，松手保留惯性。
+- 切水果：食指快速划过水果，连击加分；炸弹扣命。
 
 训练 / 评估：
 

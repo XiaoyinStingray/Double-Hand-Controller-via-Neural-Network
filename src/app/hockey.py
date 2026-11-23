@@ -12,16 +12,17 @@ import random
 import cv2
 
 PUCK_R = 11
-PADDLE_R = 26
-GOAL_H = 160
+PADDLE_R = 32
+GOAL_H = 180
+HIT_PAD = 10
 
 
 class AirHockey:
     def __init__(self, width: int, height: int,
-                 target: int = 5,
+                 target: int = 3,
                  duration: float = 90.0,
-                 base_speed: float = 320.0,
-                 max_speed: float = 760.0,
+                 base_speed: float = 240.0,
+                 max_speed: float = 520.0,
                  seed: int = 0):
         self.w = int(width)
         self.h = int(height)
@@ -31,6 +32,7 @@ class AirHockey:
         self.max_speed = max_speed
         self.rng = random.Random(seed)
         self.trail = deque(maxlen=12)
+        self.hint = "paddle follows palm | fist 0.4s exits | g mouse | q quit"
         self.reset(0.0)
 
     # ---------------- state ----------------
@@ -45,17 +47,20 @@ class AirHockey:
         self.puck_v = [0.0, 0.0]
         self.trail.clear()
         self.serve_dir = 1 if self.rng.random() < 0.5 else -1
-        self.serve_at = now + 1.2
+        self.serve_at = now + 1.5
         self.start_t = now
+        self.last_touch = now
         self.over = False
         self.over_t = 0.0
         self.winner = ""
 
-    def set_targets(self, targets) -> None:
-        """targets: {side: (u, v)} with u,v in [0,1] over that side's region."""
-        for side, (u, v) in targets.items():
-            u = min(max(float(u), 0.0), 1.0)
-            v = min(max(float(v), 0.0), 1.0)
+    def set_inputs(self, inputs, now: float) -> None:
+        """inputs: {side: {"u": 0..1, "v": 0..1, ...}} for each half."""
+        for side, h in inputs.items():
+            if side not in self.target_pos or "u" not in h:
+                continue
+            u = min(max(float(h["u"]), 0.0), 1.0)
+            v = min(max(float(h["v"]), 0.0), 1.0)
             half = self.w / 2.0
             x0 = PADDLE_R if side == "Left" else half + PADDLE_R
             x1 = half - PADDLE_R if side == "Left" else self.w - PADDLE_R
@@ -75,6 +80,7 @@ class AirHockey:
 
     def _goal(self, scorer: str, now: float) -> None:
         self.score[scorer] += 1
+        self.last_touch = now
         if self.score[scorer] >= self.target:
             self._finish(now)
             return
@@ -96,7 +102,7 @@ class AirHockey:
             self._finish(now)
             return
 
-        alpha = 1.0 - math.exp(-dt / 0.06)
+        alpha = 1.0 - math.exp(-dt / 0.045)
         for side in ("Left", "Right"):
             px, py = self.paddle[side]
             tx, ty = self.target_pos[side]
@@ -113,6 +119,15 @@ class AirHockey:
         if self.puck_v[0] == 0.0 and self.puck_v[1] == 0.0:
             self.puck_v = [self.serve_dir * self.base_speed,
                            self.rng.uniform(-0.30, 0.30) * self.base_speed]
+            self.last_touch = now
+        elif now - self.last_touch > 10.0:
+            # safety: puck stuck behind a paddle or in a corner
+            self.puck = [self.w * 0.5, self.h * 0.5]
+            self.puck_v = [0.0, 0.0]
+            self.trail.clear()
+            self.serve_at = now + 1.0
+            self.last_touch = now
+            return
 
         self.puck[0] += self.puck_v[0] * dt
         self.puck[1] += self.puck_v[1] * dt
@@ -125,21 +140,30 @@ class AirHockey:
             self.puck[1] = self.h - PUCK_R
             self.puck_v[1] = -abs(self.puck_v[1])
 
+        best = None
+        best_pen = 0.0
         for side in ("Left", "Right"):
-            self._hit_paddle(side)
+            px, py = self.paddle[side]
+            dist = math.hypot(self.puck[0] - px, self.puck[1] - py)
+            pen = PUCK_R + PADDLE_R + HIT_PAD - dist
+            if pen > best_pen:
+                best_pen = pen
+                best = side
+        if best is not None:
+            self._hit_paddle(best, now)
 
         if self.puck[0] - PUCK_R < 0:
             self._goal("Right", now)
         elif self.puck[0] + PUCK_R > self.w:
             self._goal("Left", now)
 
-    def _hit_paddle(self, side: str) -> None:
+    def _hit_paddle(self, side: str, now: float) -> None:
         px, py = self.paddle[side]
         dx = self.puck[0] - px
         dy = self.puck[1] - py
         dist = math.hypot(dx, dy)
         r_sum = PUCK_R + PADDLE_R
-        if dist >= r_sum:
+        if dist >= r_sum + HIT_PAD:
             return
         if dist < 1e-6:
             nx, ny = (1.0 if side == "Left" else -1.0), 0.0
@@ -156,17 +180,19 @@ class AirHockey:
 
         pvx, pvy = self.paddle_v[side]
         pvn = pvx * nx + pvy * ny
-        self.puck_v[0] += 0.8 * pvn * nx
-        self.puck_v[1] += 0.8 * pvn * ny
+        self.puck_v[0] += 0.45 * pvn * nx
+        self.puck_v[1] += 0.45 * pvn * ny
 
         speed = math.hypot(self.puck_v[0], self.puck_v[1])
         if speed < 1e-6:
             self.puck_v = [nx * self.base_speed, ny * self.base_speed]
-            return
-        speed = min(speed * 1.04, self.max_speed)
-        scale = speed / math.hypot(self.puck_v[0], self.puck_v[1])
+            speed = self.base_speed
+        speed = min(speed * 1.02, self.max_speed)
+        speed = max(speed, self.base_speed * 0.85)
+        scale = speed / max(math.hypot(self.puck_v[0], self.puck_v[1]), 1e-6)
         self.puck_v[0] *= scale
         self.puck_v[1] *= scale
+        self.last_touch = now
 
     # ---------------- drawing ----------------
     def draw_world(self, frame) -> None:

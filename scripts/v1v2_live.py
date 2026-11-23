@@ -1,10 +1,15 @@
-"""V1 + V2 live preview: YOLO-pose -> tracker -> features -> GRU ONNX.
+"""V1 + V2 live pipeline: YOLO-pose -> tracker -> features -> GRU ONNX.
 
-No mouse control yet. Shows boxes, track IDs, GRU gesture/confidence and
-latency. Use `--no-gru` for the detector/tracker-only view.
+Optional layers on top of the same pipeline:
+  --mouse          geometric mouse (cursor / click / drag / scroll)
+  --demo hockey    two-hand air hockey
+  --demo 3d        pinch-driven 3D object viewer
+  --demo fruit     two-hand fruit slicing
 
 Usage:
     python scripts/v1v2_live.py
+    python scripts/v1v2_live.py --mouse --dry-run
+    python scripts/v1v2_live.py --demo 3d --mouse
     python scripts/v1v2_live.py --headless --frames 90
 """
 
@@ -29,7 +34,9 @@ sys.path.insert(0, str(ROOT))
 from src.features.hand_features import TrackFeatureState  # noqa: E402
 from src.features.rules import GestureRules, Stabilizer  # noqa: E402
 from src.tracking.simple_tracker import HandObservation, SimpleHandTracker  # noqa: E402
-from src.app.game import AirHockey  # noqa: E402
+from src.app.hockey import AirHockey  # noqa: E402
+from src.app.manip3d import Manip3D  # noqa: E402
+from src.app.fruit import FruitNinja  # noqa: E402
 
 CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -136,15 +143,23 @@ def main():
     p.add_argument("--cursor-source", choices=["tip", "mcp"], default="tip")
     p.add_argument("--stable-frames", type=int, default=3)
     p.add_argument("--min-hold", type=float, default=0.15)
-    # two-hand game / mode switching
-    p.add_argument("--game", action="store_true")
-    p.add_argument("--hockey-target", type=int, default=5)
+    # two-hand demo / mode switching
+    p.add_argument("--game", action="store_true",
+                   help="alias for --demo hockey")
+    p.add_argument("--demo", choices=["hockey", "3d", "fruit"], default=None)
+    p.add_argument("--hockey-target", type=int, default=3)
     p.add_argument("--hockey-time", type=float, default=90.0)
-    p.add_argument("--hockey-speed", type=float, default=320.0)
+    p.add_argument("--hockey-speed", type=float, default=240.0)
+    p.add_argument("--fruit-lives", type=int, default=3)
+    p.add_argument("--fruit-time", type=float, default=90.0)
     p.add_argument("--enter-hold", type=float, default=0.6)
     p.add_argument("--exit-hold", type=float, default=0.4)
     p.add_argument("--exit-lost", type=float, default=1.0)
     args = p.parse_args()
+
+    if args.demo is None and args.game:
+        args.demo = "hockey"
+    args.game = args.demo is not None
 
     if not args.model.exists():
         raise SystemExit(f"model not found: {args.model}")
@@ -222,15 +237,12 @@ def main():
         return s.update(r.update(feat), now)
 
     mouse_state = "RUNNING"
-    game = None
-    mode = "GAME" if (args.game and not args.mouse) else "MOUSE"
+    demo = None
+    mode = "DEMO" if (args.game and not args.mouse) else "MOUSE"
     need_reset = True
     enter_since = None
     lost_since = None
     last_now = None
-    act_x0, act_x1 = args.active_x
-    act_y0, act_y1 = args.active_y
-    act_mid = (act_x0 + act_x1) / 2.0
 
     states = {}
     last_label = {}
@@ -241,7 +253,7 @@ def main():
 
     print(f"model {args.model.name} | gru {'on' if use_gru else 'off'} | T={T}")
     print(f"mouse {'on' if args.mouse else 'off'} | dry_run={args.dry_run} | "
-          f"game {'on' if args.game else 'off'} | mode {mode}")
+          f"demo {args.demo or 'off'} | mode {mode}")
     try:
         while True:
             ok, frame = cap.read()
@@ -321,18 +333,24 @@ def main():
             geoms = {tr.track_id: stable_of(tr.track_id, feats.get(tr.track_id), now)
                      for tr in tracks}
 
-            if args.game and game is None:
-                game = AirHockey(frame.shape[1], frame.shape[0],
-                                 target=args.hockey_target,
-                                 duration=args.hockey_time,
-                                 base_speed=args.hockey_speed)
+            if args.game and demo is None:
+                fw, fh = frame.shape[1], frame.shape[0]
+                if args.demo == "hockey":
+                    demo = AirHockey(fw, fh, target=args.hockey_target,
+                                     duration=args.hockey_time,
+                                     base_speed=args.hockey_speed)
+                elif args.demo == "3d":
+                    demo = Manip3D(fw, fh)
+                else:
+                    demo = FruitNinja(fw, fh, duration=args.fruit_time,
+                                      lives=args.fruit_lives)
                 need_reset = True
 
             primary = max(tracks, key=lambda t: (t.box[0] + t.box[2]) / 2) if tracks else None
             pfeat = feats.get(primary.track_id) if primary is not None else None
             geom = geoms.get(primary.track_id, "NONE") if primary is not None else "NONE"
 
-            # single-hand mouse <-> two-hand game
+            # single-hand mouse <-> two-hand demo
             if args.game:
                 if mode == "MOUSE":
                     both_open = (len(feats) == 2 and len(geoms) == 2 and
@@ -341,7 +359,7 @@ def main():
                         if enter_since is None:
                             enter_since = now
                         if now - enter_since >= args.enter_hold:
-                            mode = "GAME"
+                            mode = "DEMO"
                             need_reset = True
                             enter_since = None
                             lost_since = None
@@ -367,26 +385,28 @@ def main():
                             mouse.on_hand_lost()
                             mouse_state = "RUNNING"
 
-            if mode == "GAME":
+            if mode == "DEMO":
                 if need_reset:
-                    game.reset(now)
+                    demo.reset(now)
                     need_reset = False
-                targets = {}
+                inputs = {}
                 for tid, f in feats.items():
                     side = sides.get(tid)
                     if side is None:
                         continue
-                    tx = f.tip[0] / max(frame.shape[1], 1)
-                    ty = f.tip[1] / max(frame.shape[0], 1)
+                    px = f.palm[0] / max(frame.shape[1], 1)
+                    py = f.palm[1] / max(frame.shape[0], 1)
                     if side == "Left":
-                        u = (tx - act_x0) / max(act_mid - act_x0, 1e-6)
+                        u = 2.0 * px
                     else:
-                        u = (tx - act_mid) / max(act_x1 - act_mid, 1e-6)
-                    v = (ty - act_y0) / max(act_y1 - act_y0, 1e-6)
-                    targets[side] = (u, v)
-                game.set_targets(targets)
+                        u = 2.0 * (px - 0.5)
+                    v = py
+                    inputs[side] = {"u": u, "v": v, "tip": f.tip,
+                                    "palm": f.palm, "pinch": float(f.pinch),
+                                    "geom": geoms.get(tid, "NONE")}
+                demo.set_inputs(inputs, now)
                 dt = 0.0 if last_now is None else now - last_now
-                game.update(now, dt)
+                demo.update(now, dt)
                 last_now = now
             elif mouse is not None:
                 if pfeat is None:
@@ -422,19 +442,20 @@ def main():
                     lab = ", ".join(last_label.get(t.track_id, f"#{t.track_id}") for t in tracks)
                     act = (mouse.current_action(now, geom)
                            if mouse is not None and mode == "MOUSE" else "-")
-                    gs = f" {game.status()}" if (game is not None and mode == "GAME") else ""
+                    gs = (f" {args.demo} {demo.status()}"
+                          if demo is not None and mode == "DEMO" else "")
                     print(f"frame {n:4d} | fps {fps:5.1f} | infer {infer_ms:4.1f} ms | "
                           f"gru {gru_ms:4.2f} ms | tracks {len(tracks)} | {lab} | "
                           f"{mode}{gs} | {mouse_state} {act}")
             else:
-                if mode == "GAME":
-                    game.draw_world(frame)
+                if mode == "DEMO":
+                    demo.draw_world(frame)
                     draw(frame, tracks, last_label)
-                    game.draw_hud(frame, now)
+                    demo.draw_hud(frame, now)
                     cv2.putText(frame, f"FPS {fps:5.1f}  infer {infer_ms:4.1f} ms",
                                 (frame.shape[1] - 250, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-                    hint = "both open: paddles | fist 0.4s / hand lost: exit | g mouse | q quit"
+                    hint = demo.hint
                 else:
                     draw(frame, tracks, last_label)
                     cv2.putText(frame,
@@ -457,8 +478,8 @@ def main():
                                     (220, 220, 220), 1)
                     hint = "Esc/q quit | p pause | r resume"
                     if args.game:
-                        hint += " | both hands open = game"
-                hint_y = frame.shape[0] - 34 if mode == "GAME" else frame.shape[0] - 12
+                        hint += f" | both hands open = {args.demo}"
+                hint_y = frame.shape[0] - 34 if mode == "DEMO" else frame.shape[0] - 12
                 cv2.putText(frame, hint, (10, hint_y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
                 cv2.imshow("V1+V2 live", frame)
@@ -466,7 +487,7 @@ def main():
                 if key in (27, ord("q")):
                     break
                 if args.game and key == ord("g"):
-                    mode = "MOUSE" if mode == "GAME" else "GAME"
+                    mode = "MOUSE" if mode == "DEMO" else "DEMO"
                     need_reset = True
                     enter_since = None
                     lost_since = None
@@ -476,7 +497,9 @@ def main():
                 if mouse is not None and key == ord("p"):
                     mouse.pause()
                     mouse_state = "PAUSED"
-                if mouse is not None and key == ord("r"):
+                if args.game and mode == "DEMO" and key == ord("r"):
+                    demo.reset(now)
+                elif mouse is not None and key == ord("r"):
                     mouse.resume()
                     mouse_state = "RUNNING"
 
