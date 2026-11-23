@@ -110,6 +110,8 @@ def main():
     p.add_argument("--min-hits", type=int, default=2)
     p.add_argument("--max-age", type=float, default=1.0)
     p.add_argument("--max-tracks", type=int, default=2)
+    p.add_argument("--kpt-alpha", type=float, default=0.65,
+                   help="keypoint EMA alpha; higher = less lag")
     p.add_argument("--conf-gesture", type=float, default=0.50)
     p.add_argument("--device", default="0")
     p.add_argument("--headless", action="store_true")
@@ -149,12 +151,11 @@ def main():
     p.add_argument("--demo", choices=["hockey", "3d", "fruit"], default=None)
     p.add_argument("--hockey-target", type=int, default=3)
     p.add_argument("--hockey-time", type=float, default=90.0)
-    p.add_argument("--hockey-speed", type=float, default=240.0)
+    p.add_argument("--hockey-speed", type=float, default=200.0)
     p.add_argument("--fruit-lives", type=int, default=3)
-    p.add_argument("--fruit-time", type=float, default=90.0)
+    p.add_argument("--fruit-time", type=float, default=60.0)
     p.add_argument("--enter-hold", type=float, default=0.6)
-    p.add_argument("--exit-hold", type=float, default=0.4)
-    p.add_argument("--exit-lost", type=float, default=1.0)
+    p.add_argument("--exit-hold", type=float, default=0.8)
     args = p.parse_args()
 
     if args.demo is None and args.game:
@@ -189,7 +190,8 @@ def main():
     model = YOLO(str(args.model))
     tracker = SimpleHandTracker(max_tracks=args.max_tracks,
                                 min_hits=args.min_hits,
-                                max_age=args.max_age)
+                                max_age=args.max_age,
+                                alpha_kpt=0.90 if args.game else args.kpt_alpha)
 
     if args.headless and args.mouse and not args.dry_run:
         raise SystemExit("--headless with --mouse requires --dry-run")
@@ -239,9 +241,10 @@ def main():
     mouse_state = "RUNNING"
     demo = None
     mode = "DEMO" if (args.game and not args.mouse) else "MOUSE"
+    need_hands = 2 if args.demo == "hockey" else 1
+    demo_active = True
     need_reset = True
     enter_since = None
-    lost_since = None
     last_now = None
 
     states = {}
@@ -353,34 +356,28 @@ def main():
             # single-hand mouse <-> two-hand demo
             if args.game:
                 if mode == "MOUSE":
-                    both_open = (len(feats) == 2 and len(geoms) == 2 and
-                                 all(g == "OPEN" for g in geoms.values()))
-                    if both_open:
+                    open_hands = sum(1 for g in geoms.values() if g == "OPEN")
+                    ready = len(feats) >= 2 and open_hands >= 2
+                    if ready:
                         if enter_since is None:
                             enter_since = now
                         if now - enter_since >= args.enter_hold:
                             mode = "DEMO"
                             need_reset = True
                             enter_since = None
-                            lost_since = None
+                            tracker.alpha_kpt = 0.90
                             if mouse is not None:
                                 mouse.on_hand_lost()
                                 mouse_state = "RUNNING"
                     else:
                         enter_since = None
                 else:
-                    if len(feats) < 2:
-                        if lost_since is None:
-                            lost_since = now
-                    else:
-                        lost_since = None
                     fist_out = any(
                         g == "FIST" and stabs[tid].held(now) >= args.exit_hold
                         for tid, g in geoms.items())
-                    if fist_out or (lost_since is not None and
-                                    now - lost_since >= args.exit_lost):
+                    if fist_out:
                         mode = "MOUSE"
-                        lost_since = None
+                        tracker.alpha_kpt = args.kpt_alpha
                         if mouse is not None:
                             mouse.on_hand_lost()
                             mouse_state = "RUNNING"
@@ -389,25 +386,30 @@ def main():
                 if need_reset:
                     demo.reset(now)
                     need_reset = False
-                inputs = {}
-                for tid, f in feats.items():
-                    side = sides.get(tid)
-                    if side is None:
-                        continue
-                    px = f.palm[0] / max(frame.shape[1], 1)
-                    py = f.palm[1] / max(frame.shape[0], 1)
-                    if side == "Left":
-                        u = 2.0 * px
-                    else:
-                        u = 2.0 * (px - 0.5)
-                    v = py
-                    inputs[side] = {"u": u, "v": v, "tip": f.tip,
-                                    "palm": f.palm, "pinch": float(f.pinch),
-                                    "geom": geoms.get(tid, "NONE")}
-                demo.set_inputs(inputs, now)
-                dt = 0.0 if last_now is None else now - last_now
-                demo.update(now, dt)
-                last_now = now
+                demo_active = len(feats) >= need_hands
+                if demo_active:
+                    inputs = {}
+                    for tid, f in feats.items():
+                        side = sides.get(tid)
+                        if side is None:
+                            continue
+                        px = f.palm[0] / max(frame.shape[1], 1)
+                        py = f.palm[1] / max(frame.shape[0], 1)
+                        if side == "Left":
+                            u = 2.0 * px
+                        else:
+                            u = 2.0 * (px - 0.5)
+                        v = py
+                        inputs[side] = {"u": u, "v": v, "tip": f.tip,
+                                        "palm": f.palm, "pinch": float(f.pinch),
+                                        "geom": geoms.get(tid, "NONE")}
+                    demo.set_inputs(inputs, now)
+                    dt = 0.0 if last_now is None else now - last_now
+                    demo.update(now, dt)
+                    last_now = now
+                else:
+                    demo.set_inputs({}, now)
+                    last_now = None
             elif mouse is not None:
                 if pfeat is None:
                     mouse.on_hand_lost()
@@ -444,14 +446,30 @@ def main():
                            if mouse is not None and mode == "MOUSE" else "-")
                     gs = (f" {args.demo} {demo.status()}"
                           if demo is not None and mode == "DEMO" else "")
+                    if mode == "DEMO" and not demo_active:
+                        gs += " HANDS-LOST"
                     print(f"frame {n:4d} | fps {fps:5.1f} | infer {infer_ms:4.1f} ms | "
                           f"gru {gru_ms:4.2f} ms | tracks {len(tracks)} | {lab} | "
                           f"{mode}{gs} | {mouse_state} {act}")
             else:
                 if mode == "DEMO":
                     demo.draw_world(frame)
-                    draw(frame, tracks, last_label)
                     demo.draw_hud(frame, now)
+                    if not demo_active:
+                        msg = ("SHOW BOTH HANDS" if need_hands == 2
+                               else "SHOW HAND")
+                        size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX,
+                                               0.8, 2)[0]
+                        cv2.putText(frame, msg,
+                                    ((frame.shape[1] - size[0]) // 2,
+                                     frame.shape[0] // 2 - 50),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                                    (0, 0, 0), 5)
+                        cv2.putText(frame, msg,
+                                    ((frame.shape[1] - size[0]) // 2,
+                                     frame.shape[0] // 2 - 50),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                                    (0, 180, 255), 2)
                     cv2.putText(frame, f"FPS {fps:5.1f}  infer {infer_ms:4.1f} ms",
                                 (frame.shape[1] - 250, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
@@ -479,6 +497,11 @@ def main():
                     hint = "Esc/q quit | p pause | r resume"
                     if args.game:
                         hint += f" | both hands open = {args.demo}"
+                    if args.game and enter_since is not None:
+                        remain = max(0.0, args.enter_hold - (now - enter_since))
+                        cv2.putText(frame, f"{args.demo.upper()} in {remain:.1f}s",
+                                    (10, 118), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
+                                    (0, 200, 255), 2)
                 hint_y = frame.shape[0] - 34 if mode == "DEMO" else frame.shape[0] - 12
                 cv2.putText(frame, hint, (10, hint_y),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
@@ -490,7 +513,7 @@ def main():
                     mode = "MOUSE" if mode == "DEMO" else "DEMO"
                     need_reset = True
                     enter_since = None
-                    lost_since = None
+                    tracker.alpha_kpt = 0.90 if mode == "DEMO" else args.kpt_alpha
                     if mouse is not None:
                         mouse.on_hand_lost()
                         mouse_state = "RUNNING"

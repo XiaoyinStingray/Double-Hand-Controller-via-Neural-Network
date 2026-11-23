@@ -61,7 +61,7 @@ class Manip3D:
         self.verts, self.faces = _icosphere(subdiv)
         self.light = np.asarray([-0.35, -0.55, 0.75], dtype=np.float64)
         self.light /= np.linalg.norm(self.light)
-        self.hint = "one hand pinch: spin | two hands: move + scale | r reset | fist exit | g mouse | q quit"
+        self.hint = "one hand pinch: spin | two hands: move + scale | r reset | fist 0.8s exits | g mouse | q quit"
         self.reset(0.0)
 
     def reset(self, now: float) -> None:

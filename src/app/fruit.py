@@ -13,8 +13,9 @@ import random
 import cv2
 import numpy as np
 
-GRAVITY = 1100.0
-TIP_SPEED_PX = 14.0
+GRAVITY = 900.0
+TIP_SPEED_PX = 8.0
+LEAD = 0.8
 
 FRUIT_STYLES = [
     ((40, 120, 40), (60, 60, 220)),    # watermelon
@@ -62,9 +63,9 @@ class Particle:
 
 class FruitNinja:
     def __init__(self, width: int, height: int,
-                 duration: float = 90.0,
+                 duration: float = 60.0,
                  lives: int = 3,
-                 spawn_interval: float = 0.65,
+                 spawn_interval: float = 0.75,
                  seed: int = 0):
         self.w = int(width)
         self.h = int(height)
@@ -72,9 +73,10 @@ class FruitNinja:
         self.start_lives = lives
         self.spawn_interval = spawn_interval
         self.rng = random.Random(seed)
-        self.hint = "fast index fingers slice | r restart | fist exit | g mouse | q quit"
+        self.hint = "fast index fingers slice | r restart | fist 0.8s exits | g mouse | q quit"
         self.trail = {"Left": deque(maxlen=10), "Right": deque(maxlen=10)}
         self.prev_tip = {}
+        self.prev_raw = {}
         self.reset(0.0)
 
     def reset(self, now: float) -> None:
@@ -87,6 +89,7 @@ class FruitNinja:
         self.particles = []
         self.trail = {"Left": deque(maxlen=10), "Right": deque(maxlen=10)}
         self.prev_tip = {}
+        self.prev_raw = {}
         self.start_t = now
         self.next_spawn = now + 0.6
         self.over = False
@@ -104,9 +107,9 @@ class FruitNinja:
         bomb = self.rng.random() < 0.10 and (now - self.start_t) > 8.0
         x = self.rng.uniform(70, self.w - 70)
         y = self.h + 30
-        vy = -self.rng.uniform(690, 880)
+        vy = -self.rng.uniform(620, 780)
         vx = (self.w * 0.5 - x) * self.rng.uniform(0.25, 0.60)
-        r = self.rng.uniform(23, 33)
+        r = self.rng.uniform(26, 36)
         if bomb:
             self.fruits.append(Fruit(x, y, vx, vy, 26, (30, 30, 30),
                                      (60, 60, 60), True))
@@ -121,22 +124,32 @@ class FruitNinja:
         for side in ("Left", "Right"):
             if side not in inputs:
                 self.prev_tip.pop(side, None)
+                self.prev_raw.pop(side, None)
                 self.trail[side].clear()
                 continue
-            tip = np.asarray(inputs[side]["tip"], dtype=np.float64)
-            self.trail[side].append((float(tip[0]), float(tip[1])))
-            prev = self.prev_tip.get(side)
-            self.prev_tip[side] = tip
+            raw = np.asarray(inputs[side]["tip"], dtype=np.float64)
+            prev = self.prev_raw.get(side)
+            if prev is None:
+                pred = raw
+            else:
+                v = raw - prev
+                n = float(np.linalg.norm(v))
+                if n > 90.0:
+                    v *= 90.0 / n
+                pred = raw + LEAD * v
+            self.prev_raw[side] = raw
+            self.prev_tip[side] = pred
+            self.trail[side].append((float(pred[0]), float(pred[1])))
             if prev is None:
                 continue
-            seg = float(np.linalg.norm(tip - prev))
+            seg = float(np.linalg.norm(pred - prev))
             if seg >= TIP_SPEED_PX:
-                self._slice(prev, tip, now)
+                self._slice(prev, pred, now)
 
     def _slice(self, a, b, now: float) -> None:
         removed = []
         for i, f in enumerate(self.fruits):
-            if _seg_dist(a, b, (f.x, f.y)) <= f.r + 3:
+            if _seg_dist(a, b, (f.x, f.y)) <= f.r + 10:
                 removed.append(i)
                 if f.bomb:
                     self.lives -= 1
@@ -179,8 +192,6 @@ class FruitNinja:
     # ---------------- per-frame ----------------
     def update(self, now: float, dt: float) -> None:
         if self.over:
-            if now - self.over_t >= 4.0:
-                self.reset(now)
             return
         dt = min(max(dt, 0.0), 0.10)
         if now - self.start_t >= self.duration:
@@ -287,10 +298,19 @@ class FruitNinja:
         if self.over:
             msg = f"{self.reason}   SCORE {self.score}"
             size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.95, 3)[0]
-            cv2.putText(frame, msg, ((self.w - size[0]) // 2, self.h // 2),
+            org = ((self.w - size[0]) // 2, self.h // 2)
+            pad = 18
+            cv2.rectangle(frame, (org[0] - pad, org[1] - size[1] - pad),
+                          (org[0] + size[0] + pad, org[1] + 48 + pad),
+                          (16, 16, 16), -1)
+            cv2.putText(frame, msg, org,
                         cv2.FONT_HERSHEY_SIMPLEX, 0.95, (0, 0, 0), 6)
             cv2.putText(frame, msg, ((self.w - size[0]) // 2, self.h // 2),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.95, (0, 255, 255), 3)
+            sub = "r restart   |   fist 0.8s exit"
+            size = cv2.getTextSize(sub, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0]
+            cv2.putText(frame, sub, ((self.w - size[0]) // 2, self.h // 2 + 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
 
     def draw(self, frame, now: float) -> None:
         self.draw_world(frame)

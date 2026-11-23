@@ -13,7 +13,7 @@ import cv2
 
 PUCK_R = 11
 PADDLE_R = 32
-GOAL_H = 180
+GOAL_H = 160
 HIT_PAD = 10
 
 
@@ -21,8 +21,8 @@ class AirHockey:
     def __init__(self, width: int, height: int,
                  target: int = 3,
                  duration: float = 90.0,
-                 base_speed: float = 240.0,
-                 max_speed: float = 520.0,
+                 base_speed: float = 200.0,
+                 max_speed: float = 420.0,
                  seed: int = 0):
         self.w = int(width)
         self.h = int(height)
@@ -32,7 +32,8 @@ class AirHockey:
         self.max_speed = max_speed
         self.rng = random.Random(seed)
         self.trail = deque(maxlen=12)
-        self.hint = "paddle follows palm | fist 0.4s exits | g mouse | q quit"
+        self.hint = "palm moves paddle | r restart | fist 0.8s exits | g mouse | q quit"
+        self.inputs = {}
         self.reset(0.0)
 
     # ---------------- state ----------------
@@ -50,12 +51,15 @@ class AirHockey:
         self.serve_at = now + 1.5
         self.start_t = now
         self.last_touch = now
+        self.flash_t = -1e9
+        self.last_scorer = ""
         self.over = False
         self.over_t = 0.0
         self.winner = ""
 
     def set_inputs(self, inputs, now: float) -> None:
         """inputs: {side: {"u": 0..1, "v": 0..1, ...}} for each half."""
+        self.inputs = inputs
         for side, h in inputs.items():
             if side not in self.target_pos or "u" not in h:
                 continue
@@ -81,6 +85,8 @@ class AirHockey:
     def _goal(self, scorer: str, now: float) -> None:
         self.score[scorer] += 1
         self.last_touch = now
+        self.flash_t = now
+        self.last_scorer = scorer
         if self.score[scorer] >= self.target:
             self._finish(now)
             return
@@ -93,8 +99,6 @@ class AirHockey:
     # ---------------- per-frame ----------------
     def update(self, now: float, dt: float) -> None:
         if self.over:
-            if now - self.over_t >= 4.0:
-                self.reset(now)
             return
 
         dt = min(max(dt, 0.0), 0.10)
@@ -225,6 +229,13 @@ class AirHockey:
         cv2.circle(frame, (int(self.puck[0]), int(self.puck[1])), PUCK_R,
                    (0, 255, 255), -1)
 
+        for side, h in self.inputs.items():
+            if "palm" not in h:
+                continue
+            p = (int(h["palm"][0]), int(h["palm"][1]))
+            cv2.circle(frame, p, 10, colors.get(side, (200, 200, 200)), 2,
+                       cv2.LINE_AA)
+
     def draw_hud(self, frame, now: float) -> None:
         text = f"L {self.score['Left']} : {self.score['Right']} R"
         size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)[0]
@@ -239,16 +250,35 @@ class AirHockey:
         cv2.putText(frame, hint, (12, self.h - 12),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (190, 190, 190), 1)
 
+        if now - self.flash_t < 0.7 and not self.over:
+            color = (0, 200, 255) if self.last_scorer == "Left" else (255, 160, 0)
+            cv2.rectangle(frame, (0, 0), (self.w - 1, self.h - 1), color, 8)
+            msg = f"{self.last_scorer.upper()} SCORES"
+            size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+            cv2.putText(frame, msg, ((self.w - size[0]) // 2, self.h // 2 + 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 4)
+            cv2.putText(frame, msg, ((self.w - size[0]) // 2, self.h // 2 + 70),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
         if self.over:
             msg = f"{self.winner} WINS  {self.score['Left']} : {self.score['Right']}"
             size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.95, 3)[0]
             org = ((self.w - size[0]) // 2, self.h // 2)
+            pad = 18
+            cv2.rectangle(frame, (org[0] - pad, org[1] - size[1] - pad),
+                          (org[0] + size[0] + pad, org[1] + 52 + pad),
+                          (16, 16, 16), -1)
             cv2.putText(frame, msg, org, cv2.FONT_HERSHEY_SIMPLEX, 0.95,
                         (0, 0, 0), 6)
             cv2.putText(frame, msg, org, cv2.FONT_HERSHEY_SIMPLEX, 0.95,
                         (0, 255, 255), 3)
+            sub = "r restart   |   fist 0.8s exit"
+            size = cv2.getTextSize(sub, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0]
+            cv2.putText(frame, sub, ((self.w - size[0]) // 2, self.h // 2 + 44),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1)
         elif now < self.serve_at:
-            msg = "READY"
+            secs = max(1, int(math.ceil(self.serve_at - now)))
+            msg = f"READY {secs}"
             size = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
             cv2.putText(frame, msg, ((self.w - size[0]) // 2, self.h // 2 + 70),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200, 200, 200), 2)
