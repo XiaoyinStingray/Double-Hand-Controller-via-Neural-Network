@@ -40,8 +40,9 @@ class MouseController:
                  click_min_hold_s: float = 0.04,
                  click_context_s: float = 0.6,
                  deadzone_px: float = 1.5,
-                 scroll_speed: float = 90.0,
-                 scroll_interval_s: float = 0.03,
+                 scroll_gain: float = 0.12,
+                 scroll_deadzone: float = 12.0,
+                 scroll_max_ticks: int = 5,
                  scroll_invert: bool = False,
                  mincutoff: float = 1.0,
                  beta: float = 0.012,
@@ -57,8 +58,9 @@ class MouseController:
         self.click_min_hold_s = click_min_hold_s
         self.click_context_s = click_context_s
         self.deadzone_px = deadzone_px
-        self.scroll_speed = scroll_speed
-        self.scroll_interval_s = scroll_interval_s
+        self.scroll_gain = scroll_gain
+        self.scroll_deadzone = scroll_deadzone
+        self.scroll_max_ticks = max(1, int(scroll_max_ticks))
         self.scroll_invert = scroll_invert
         self.cursor_source = cursor_source
         self.pinch_latch = pinch_latch
@@ -96,7 +98,10 @@ class MouseController:
         self.drag_origin_palm = None
         self.drag_origin_cursor = None
         self.last_click = -1e9
-        self.last_scroll = -1e9
+        self.scroll_anchor_y = None
+        self.scroll_accum = 0.0
+        self.scroll_prev_t = 0.0
+        self.was_open = False
         self.pinch_latched = False
         self.latched_cursor = None
         self.last_point_t = -1e9
@@ -140,6 +145,11 @@ class MouseController:
             _pyautogui.scroll(ticks)
 
     # ---------------- state changes ----------------
+    def _reset_scroll(self) -> None:
+        self.scroll_anchor_y = None
+        self.scroll_accum = 0.0
+        self.was_open = False
+
     def release_all(self) -> None:
         if self.dragging:
             self._up()
@@ -151,6 +161,7 @@ class MouseController:
         self.pinch_latched = False
         self.latched_cursor = None
         self.click_allowed = False
+        self._reset_scroll()
 
     def pause(self) -> None:
         self.release_all()
@@ -165,6 +176,7 @@ class MouseController:
         self.cursor = None
         self.last_sent = None
         self.last_point_t = -1e9
+        self._reset_scroll()
         self.filter.reset()
 
     def on_hand_lost(self) -> None:
@@ -180,6 +192,7 @@ class MouseController:
         self.latched_cursor = None
         self.click_allowed = False
         self.was_pointing = False
+        self._reset_scroll()
         self.cursor = None
         self.last_sent = None
         self.last_point_t = -1e9
@@ -271,18 +284,36 @@ class MouseController:
         else:
             self.was_pointing = False
 
-        # open palm + vertical velocity = wheel
+        # open palm + vertical offset from the anchor = wheel joystick.
+        # Holding the hand above/below the anchor keeps scrolling; returning
+        # to the anchor (or leaving OPEN) stops. Speed scales with offset.
         if stable == "OPEN":
-            vy = float(feat.v_palm[1])
-            if abs(vy) > self.scroll_speed and (
-                    now - self.last_scroll) >= self.scroll_interval_s:
-                mag = max(1, min(4, int(abs(vy) / self.scroll_speed)))
-                ticks = mag if vy < 0 else -mag
-                if self.scroll_invert:
-                    ticks = -ticks
-                self._scroll(ticks)
-                self.last_scroll = now
-                self._set_action(f"SCROLL {ticks:+d}", now)
+            if not self.was_open:
+                self.was_open = True
+                self.scroll_anchor_y = float(feat.palm[1])
+                self.scroll_accum = 0.0
+                self.scroll_prev_t = now
+            offset = self.scroll_anchor_y - float(feat.palm[1])
+            if abs(offset) <= self.scroll_deadzone:
+                self.scroll_accum = 0.0
+            else:
+                dt = min(max(now - self.scroll_prev_t, 0.0), 0.10)
+                speed = self.scroll_gain * (abs(offset) - self.scroll_deadzone)
+                self.scroll_accum += math.copysign(speed, offset) * dt
+                ticks = int(self.scroll_accum)
+                if ticks:
+                    self.scroll_accum -= ticks
+                    ticks = max(-self.scroll_max_ticks,
+                                min(self.scroll_max_ticks, ticks))
+                    if self.scroll_invert:
+                        ticks = -ticks
+                    self._scroll(ticks)
+                    self._set_action(f"SCROLL {ticks:+d}", now)
+            self.scroll_prev_t = now
+        else:
+            self.was_open = False
+            self.scroll_anchor_y = None
+            self.scroll_accum = 0.0
 
     def current_action(self, now: float, fallback: str = "IDLE") -> str:
         if self.paused:

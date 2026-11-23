@@ -117,8 +117,9 @@ def main():
     p.add_argument("--mincutoff", type=float, default=1.0)
     p.add_argument("--beta", type=float, default=0.012)
     p.add_argument("--deadzone", type=float, default=1.5)
-    p.add_argument("--scroll-speed", type=float, default=90.0)
-    p.add_argument("--scroll-interval", type=float, default=0.03)
+    p.add_argument("--scroll-gain", type=float, default=0.12)
+    p.add_argument("--scroll-deadzone", type=float, default=12.0)
+    p.add_argument("--scroll-max-ticks", type=int, default=5)
     p.add_argument("--scroll-invert", action="store_true")
     p.add_argument("--pinch-latch", type=float, default=0.42)
     p.add_argument("--pinch-unlatch", type=float, default=0.52)
@@ -181,8 +182,9 @@ def main():
             click_min_hold_s=args.click_hold,
             click_context_s=args.click_context,
             deadzone_px=args.deadzone,
-            scroll_speed=args.scroll_speed,
-            scroll_interval_s=args.scroll_interval,
+            scroll_gain=args.scroll_gain,
+            scroll_deadzone=args.scroll_deadzone,
+            scroll_max_ticks=args.scroll_max_ticks,
             scroll_invert=args.scroll_invert,
             mincutoff=args.mincutoff,
             beta=args.beta,
