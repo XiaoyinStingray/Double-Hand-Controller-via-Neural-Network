@@ -337,6 +337,13 @@ def main():
                         extra += f" | {int(mouse.cursor[0])},{int(mouse.cursor[1])}"
                 cv2.putText(frame, extra, (10, 58),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.62, (0, 255, 0), 2)
+                if pfeat is not None:
+                    bits = "".join("1" if f else "0" for f in pfeat.fingers)
+                    cv2.putText(frame,
+                                f"pinch {pfeat.pinch:.2f} dKn {pfeat.d_knuckle:.2f} "
+                                f"aIdx {pfeat.angles[1]:3.0f} {bits}",
+                                (10, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                                (220, 220, 220), 1)
                 cv2.putText(frame, "Esc/q quit | p pause | r resume",
                             (10, frame.shape[0] - 12),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
