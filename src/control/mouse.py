@@ -11,6 +11,8 @@ import ctypes
 import math
 import time
 
+import numpy as np
+
 from src.control.one_euro import OneEuroFilter2D
 
 try:
@@ -34,9 +36,8 @@ def set_dpi_awareness() -> None:
 
 class MouseController:
     def __init__(self, dry_run: bool = False,
-                 drag_hold_s: float = 0.35,
                  click_cooldown_s: float = 0.3,
-                 click_min_hold_s: float = 0.12,
+                 click_min_hold_s: float = 0.04,
                  click_context_s: float = 0.6,
                  deadzone_px: float = 1.5,
                  scroll_speed: float = 90.0,
@@ -46,9 +47,12 @@ class MouseController:
                  beta: float = 0.012,
                  cursor_source: str = "tip",
                  pinch_latch: float = 0.42,
-                 pinch_unlatch: float = 0.52):
+                 pinch_unlatch: float = 0.52,
+                 raw_pinch_enter: float = 0.22,
+                 raw_pinch_exit: float = 0.30,
+                 drag_move_px: float = 12.0,
+                 drag_gain: float = 2.0):
         self.dry_run = dry_run
-        self.drag_hold_s = drag_hold_s
         self.click_cooldown_s = click_cooldown_s
         self.click_min_hold_s = click_min_hold_s
         self.click_context_s = click_context_s
@@ -59,6 +63,10 @@ class MouseController:
         self.cursor_source = cursor_source
         self.pinch_latch = pinch_latch
         self.pinch_unlatch = pinch_unlatch
+        self.raw_pinch_enter = raw_pinch_enter
+        self.raw_pinch_exit = raw_pinch_exit
+        self.drag_move_px = drag_move_px
+        self.drag_gain = drag_gain
 
         set_dpi_awareness()
         if _pyautogui is not None:
@@ -81,15 +89,17 @@ class MouseController:
         self.cursor = None
         self.was_pointing = False
 
-        self.pinch_active = False
+        self.raw_pinch = False
         self.pinch_start = 0.0
+        self.pinch_origin_palm = None
         self.dragging = False
+        self.drag_origin_palm = None
+        self.drag_origin_cursor = None
         self.last_click = -1e9
         self.last_scroll = -1e9
         self.pinch_latched = False
         self.latched_cursor = None
         self.last_point_t = -1e9
-        self.click_armed = False
         self.click_allowed = False
 
         self.paused = False
@@ -134,10 +144,12 @@ class MouseController:
         if self.dragging:
             self._up()
         self.dragging = False
-        self.pinch_active = False
+        self.raw_pinch = False
+        self.pinch_origin_palm = None
+        self.drag_origin_palm = None
+        self.drag_origin_cursor = None
         self.pinch_latched = False
         self.latched_cursor = None
-        self.click_armed = False
         self.click_allowed = False
 
     def pause(self) -> None:
@@ -160,10 +172,12 @@ class MouseController:
         if self.dragging:
             self._up()
         self.dragging = False
-        self.pinch_active = False
+        self.raw_pinch = False
+        self.pinch_origin_palm = None
+        self.drag_origin_palm = None
+        self.drag_origin_cursor = None
         self.pinch_latched = False
         self.latched_cursor = None
-        self.click_armed = False
         self.click_allowed = False
         self.was_pointing = False
         self.cursor = None
@@ -192,38 +206,51 @@ class MouseController:
         if stable == "POINT":
             self.last_point_t = now
 
-        # pinch: short pinch = click on release; hold = drag.
-        # Require recent pointing context and a minimum pinch duration so a
-        # transient misclassification cannot fire a click.
-        is_pinch = stable == "PINCH"
-        if is_pinch and not self.pinch_active:
-            self.pinch_active = True
+        # Raw pinch (bypasses the 3-frame stabilizer): tap = click on release;
+        # move the palm while pinching = drag. No time-based drag.
+        threshold = self.raw_pinch_exit if self.raw_pinch else self.raw_pinch_enter
+        raw_pinch = feat.pinch < threshold
+        if raw_pinch and not self.raw_pinch and feat.pinch > feat.d_knuckle * 1.15:
+            raw_pinch = False
+
+        if raw_pinch and not self.raw_pinch:
+            self.raw_pinch = True
             self.pinch_start = now
-            self.click_armed = False
+            self.pinch_origin_palm = feat.palm.copy()
             self.click_allowed = (self.cursor is not None and
                                   (now - self.last_point_t) <= self.click_context_s)
-        elif is_pinch and self.pinch_active:
-            if self.click_allowed and not self.click_armed and (
-                    now - self.pinch_start) >= self.click_min_hold_s:
-                self.click_armed = True
-            if self.click_allowed and not self.dragging and (
-                    now - self.pinch_start) >= self.drag_hold_s:
-                self._down()
-                self.dragging = True
+        elif raw_pinch and self.raw_pinch:
+            if self.dragging:
+                delta = feat.palm - self.drag_origin_palm
+                target = self.drag_origin_cursor + self.drag_gain * delta
+                tx = float(np.clip(target[0], 0, self.screen_w - 1))
+                ty = float(np.clip(target[1], 0, self.screen_h - 1))
+                self._move(tx, ty)
+                self.cursor = (tx, ty)
+                self.last_sent = (tx, ty)
                 self._set_action("DRAG", now)
-        elif not is_pinch and self.pinch_active:
-            self.pinch_active = False
+            elif self.click_allowed and self.cursor is not None:
+                moved = float(np.linalg.norm(feat.palm - self.pinch_origin_palm))
+                if moved >= self.drag_move_px and (now - self.pinch_start) >= 0.05:
+                    self._down()
+                    self.dragging = True
+                    self.drag_origin_palm = feat.palm.copy()
+                    self.drag_origin_cursor = self.cursor
+                    self._set_action("DRAG", now)
+        elif not raw_pinch and self.raw_pinch:
+            self.raw_pinch = False
             if self.dragging:
                 self._up()
                 self.dragging = False
                 self._set_action("DROP", now)
-            elif (self.click_armed and
+            elif (self.click_allowed and
+                  now - self.pinch_start >= self.click_min_hold_s and
                   now - self.last_click >= self.click_cooldown_s):
                 self._click()
                 self.last_click = now
                 self._set_action("CLICK", now)
-            self.click_armed = False
             self.click_allowed = False
+            self.pinch_origin_palm = None
 
         # cursor follows a stable POINT only, and freezes during pre-pinch
         if stable == "POINT" and not self.pinch_latched:
@@ -262,7 +289,7 @@ class MouseController:
             return "PAUSED"
         if self.dragging:
             return "DRAG"
-        if self.pinch_latched and not self.pinch_active:
+        if self.pinch_latched and not self.raw_pinch:
             return "HOLD"
         if now - self.action_t <= 0.5:
             return self.action

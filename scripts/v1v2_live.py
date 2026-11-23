@@ -122,8 +122,11 @@ def main():
     p.add_argument("--scroll-invert", action="store_true")
     p.add_argument("--pinch-latch", type=float, default=0.42)
     p.add_argument("--pinch-unlatch", type=float, default=0.52)
-    p.add_argument("--drag-hold", type=float, default=0.35)
-    p.add_argument("--click-hold", type=float, default=0.12)
+    p.add_argument("--drag-move", type=float, default=12.0)
+    p.add_argument("--drag-gain", type=float, default=2.0)
+    p.add_argument("--raw-pinch-enter", type=float, default=0.22)
+    p.add_argument("--raw-pinch-exit", type=float, default=0.30)
+    p.add_argument("--click-hold", type=float, default=0.04)
     p.add_argument("--click-context", type=float, default=0.6)
     p.add_argument("--pause-hold", type=float, default=0.4)
     p.add_argument("--resume-hold", type=float, default=0.8)
@@ -171,7 +174,10 @@ def main():
         from src.control.mouse import MouseController
         mouse = MouseController(
             dry_run=args.dry_run,
-            drag_hold_s=args.drag_hold,
+            drag_move_px=args.drag_move,
+            drag_gain=args.drag_gain,
+            raw_pinch_enter=args.raw_pinch_enter,
+            raw_pinch_exit=args.raw_pinch_exit,
             click_min_hold_s=args.click_hold,
             click_context_s=args.click_context,
             deadzone_px=args.deadzone,

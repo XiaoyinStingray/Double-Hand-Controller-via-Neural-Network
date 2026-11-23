@@ -354,8 +354,11 @@ def main() -> None:
     parser.add_argument("--cursor-source", choices=["tip", "mcp"], default="tip")
     parser.add_argument("--pinch-latch", type=float, default=0.42)
     parser.add_argument("--pinch-unlatch", type=float, default=0.52)
-    parser.add_argument("--drag-hold", type=float, default=0.35)
-    parser.add_argument("--click-hold", type=float, default=0.12)
+    parser.add_argument("--drag-move", type=float, default=12.0)
+    parser.add_argument("--drag-gain", type=float, default=2.0)
+    parser.add_argument("--raw-pinch-enter", type=float, default=0.22)
+    parser.add_argument("--raw-pinch-exit", type=float, default=0.30)
+    parser.add_argument("--click-hold", type=float, default=0.04)
     parser.add_argument("--click-context", type=float, default=0.6)
     args = parser.parse_args()
 
@@ -371,7 +374,10 @@ def main() -> None:
                             min_hold_s=args.min_hold)
     velocity = PalmVelocity()
     controller = MouseController(dry_run=args.dry_run,
-                                 drag_hold_s=args.drag_hold,
+                                 drag_move_px=args.drag_move,
+                                 drag_gain=args.drag_gain,
+                                 raw_pinch_enter=args.raw_pinch_enter,
+                                 raw_pinch_exit=args.raw_pinch_exit,
                                  click_min_hold_s=args.click_hold,
                                  click_context_s=args.click_context,
                                  deadzone_px=args.deadzone,
