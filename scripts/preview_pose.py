@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 from collections import deque
@@ -48,11 +49,38 @@ def draw_tracks(frame, tracks):
             cv2.circle(frame, tuple(p), 2, (0, 0, 255), -1)
 
 
+def plausible(box, kpts, kconf, min_box, min_kpt_conf, min_inside) -> bool:
+    """Reject background false positives with simple geometry checks."""
+    x1, y1, x2, y2 = box
+    w, h = x2 - x1, y2 - y1
+    if w < min_box or h < min_box:
+        return False
+    ar = w / max(h, 1e-6)
+    if ar < 0.30 or ar > 3.0:
+        return False
+    if float(kconf.mean()) < min_kpt_conf:
+        return False
+    inside = ((kpts[:, 0] >= x1) & (kpts[:, 0] <= x2) &
+              (kpts[:, 1] >= y1) & (kpts[:, 1] <= y2)).mean()
+    if inside < min_inside:
+        return False
+    palm = float(np.linalg.norm(kpts[0] - kpts[9]))
+    if palm < 0.10 * math.hypot(w, h):
+        return False
+    return True
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", type=Path, default=ROOT / "runs" / "pose" / "full" / "best.pt")
     p.add_argument("--camera", type=int, default=0)
-    p.add_argument("--conf", type=float, default=0.25)
+    p.add_argument("--conf", type=float, default=0.35)
+    p.add_argument("--min-kpt-conf", type=float, default=0.30)
+    p.add_argument("--min-box", type=float, default=30.0)
+    p.add_argument("--min-inside", type=float, default=0.60)
+    p.add_argument("--min-hits", type=int, default=2)
+    p.add_argument("--max-age", type=float, default=1.0)
+    p.add_argument("--max-tracks", type=int, default=2)
     p.add_argument("--imgsz", type=int, default=640)
     p.add_argument("--device", default="0")
     p.add_argument("--headless", action="store_true")
@@ -70,7 +98,9 @@ def main():
     cap.set(cv2.CAP_PROP_FPS, 30)
 
     model = YOLO(str(args.model))
-    tracker = SimpleHandTracker()
+    tracker = SimpleHandTracker(max_tracks=args.max_tracks,
+                                min_hits=args.min_hits,
+                                max_age=args.max_age)
     times = deque(maxlen=30)
     t_first = None
     t_last = None
@@ -98,7 +128,17 @@ def main():
                 scores = res.boxes.conf.cpu().numpy()
                 kpts = (res.keypoints.xy.cpu().numpy()
                         if res.keypoints is not None else np.zeros((len(boxes), 21, 2)))
-                for box, score, kp in zip(boxes, scores, kpts):
+                kconfs = None
+                if res.keypoints is not None:
+                    kconfs = getattr(res.keypoints, "conf", None)
+                    if kconfs is not None:
+                        kconfs = kconfs.cpu().numpy()
+                if kconfs is None or len(kconfs) != len(boxes):
+                    kconfs = np.ones((len(boxes), 21), dtype=np.float32)
+                for box, score, kp, kc in zip(boxes, scores, kpts, kconfs):
+                    if not plausible(box, kp, kc, args.min_box,
+                                     args.min_kpt_conf, args.min_inside):
+                        continue
                     observations.append(HandObservation(box, kp, float(score)))
 
             tracks = tracker.update(observations, now)
